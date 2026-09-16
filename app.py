@@ -62,28 +62,81 @@ with col_m2:
 target_year = st.sidebar.number_input("目标年份", 2024, 2030, 2027)
 
 # --- 衰减参数 ---
-st.sidebar.subheader("时间衰减")
-st.sidebar.caption("控制历史数据的影响力：越近的数据权重越高，越远的数据越被淡化")
+st.sidebar.subheader("时间衰减加权")
+st.sidebar.caption("控制历史数据的影响力：越近的月份权重越高，越远的月份越被淡化")
 
-lambda_val = st.sidebar.slider("衰减速度 λ", 0.50, 1.00, 0.85, 0.01,
-    help="0.85=每月衰减15%。越小=越看重近期数据，1.0=不衰减（所有月份同等对待）")
-k_val = st.sidebar.slider("收缩强度 k", 1, 20, 6,
-    help="控制自身历史数据和行业基准的混合比例。k越大=越信任行业基准，k越小=越信任该SKU自身数据")
-a_min = st.sidebar.slider("收缩权重下限", 0.0, 0.5, 0.0, 0.05,
-    help="自身数据的最低权重占比。0=新品完全用基准，0.3=至少30%用自身数据")
-a_max = st.sidebar.slider("收缩权重上限", 0.5, 1.0, 0.9, 0.05,
-    help="自身数据的最高权重占比。0.9=最多90%用自身数据，1.0=完全用自身数据（不推荐）")
+lambda_val = st.sidebar.slider(
+    "衰减速度 λ",
+    min_value=0.50, max_value=1.00, value=0.85, step=0.01,
+    help="0.85表示每月衰减15%。越小=越看重近期数据（远月数据快速淡出），1.0=不衰减（所有月份同等对待）"
+)
+st.sidebar.caption("λ越小，近月权重越高。0.85=1个月前的数据权重只有85%")
+
+k_val = st.sidebar.slider(
+    "收缩强度 k",
+    min_value=1, max_value=20, value=6,
+    help="控制自身历史数据和行业基准的混合比例。k越大=越信任行业基准，k越小=越信任该SKU自身数据"
+)
+st.sidebar.caption("k=6时，目标期6个月数据→自身占50%+基准50%；k越大越倾向基准")
+
+a_min = st.sidebar.slider(
+    "收缩权重下限",
+    min_value=0.0, max_value=0.5, value=0.0, step=0.05,
+    help="自身数据的最低权重占比。0=新品完全用基准，0.3=至少30%用自身数据"
+)
+st.sidebar.caption("下限：新品数据不足时，自身数据至少占比多少")
+
+a_max = st.sidebar.slider(
+    "收缩权重上限",
+    min_value=0.5, max_value=1.0, value=0.9, step=0.05,
+    help="自身数据的最高权重占比。0.9=最多90%用自身数据，1.0=完全用自身数据（不推荐）"
+)
+st.sidebar.caption("上限：数据充足时，自身数据最多占比多少")
+
+# --- 新品 & 基准 ---
+st.sidebar.subheader("新品与基准")
+st.sidebar.caption("控制新品判定和基准计算行为")
+
+new_product_threshold = st.sidebar.slider(
+    "新品阈值（月）",
+    min_value=1, max_value=12, value=2,
+    help="历史出单月数<=此值的SKU视为新品，完全使用行业基准占比"
+)
+st.sidebar.caption("历史出单月数<=此值→视为新品，完全用基准占比")
+
+k_cat = st.sidebar.slider(
+    "品类层最小等效观测数",
+    min_value=3, max_value=50, value=12,
+    help="品类/SPU基准的贝叶斯收缩参数。越大=品类基准越倾向全公司均值，越小=越信任品类自身数据"
+)
+st.sidebar.caption("品类基准的收缩强度，类似k但作用于品类层")
+
+alpha_trend = st.sidebar.slider(
+    "趋势因子 α",
+    min_value=0.0, max_value=1.0, value=0.3, step=0.05,
+    help="近期同月与远期同月占比差×α叠加到最终占比。0=不调整，0.3=叠加30%的趋势差，1.0=完全用趋势差"
+)
+st.sidebar.caption("0=不做趋势调整，0.3=叠加30%的趋势变化，越大越跟随近期趋势")
 
 # --- 季节因子 ---
 st.sidebar.subheader("季节匹配因子")
-st.sidebar.caption("对季节性品类，增强同季节历史数据的权重（如5月发货则4-6月数据加权）")
+st.sidebar.caption("对季节性品类，增强同季节历史数据的权重（如6月发货则5-6月数据加权）")
 
 seasonal_on = st.sidebar.checkbox("启用季节因子", value=True)
 if seasonal_on:
-    beta = st.sidebar.slider("季节增强倍数 β", 1.0, 5.0, 3.0, 0.1,
-        help="同季节数据权重乘以此倍数。3.0=同季节数据权重×3，1.0=不增强")
-    seasonal_window = st.sidebar.slider("季节窗口范围", 1, 3, 1,
-        help="目标月前后N个月算同季节。1=前后1个月，3=前后3个月")
+    beta = st.sidebar.slider(
+        "季节增强倍数 β",
+        min_value=1.0, max_value=5.0, value=3.0, step=0.1,
+        help="同季节数据权重乘以此倍数。3.0=同季节数据权重×3，1.0=不增强"
+    )
+    st.sidebar.caption("β=3.0时，同季节数据权重放大3倍")
+
+    seasonal_window = st.sidebar.slider(
+        "季节窗口范围",
+        min_value=1, max_value=3, value=1,
+        help="目标月前N个月的数据算同季节。1=目标月前1个月，2=前2个月"
+    )
+    st.sidebar.caption("窗口方向=含末（目标月作为末尾）。如6月发货+窗口1=增强5-6月数据")
 else:
     beta = 1.0
     seasonal_window = 1
@@ -107,7 +160,6 @@ with col_sample:
     use_sample = st.button("使用示例数据", help="用提取的数据做演示")
 
 with col_tpl:
-    # 下载模板
     tpl_cols = ["源SKU", "SPU", "室内外", "一级分类", "年", "月", "美西", "美东", "美南GA", "美南TX"]
     tpl_df = pd.DataFrame(columns=tpl_cols)
     tpl_csv = tpl_df.to_csv(index=False).encode("utf-8-sig")
@@ -147,49 +199,75 @@ elif use_sample:
     else:
         st.warning("示例数据文件不存在，请上传数据。")
 
-# --- 可选：上传映射表和基准表 ---
+# --- 可选：上传映射表和基准表（CSV/Excel格式） ---
 with st.expander("可选：上传混用SKU映射表 / 基准表", expanded=False):
     col_m, col_b = st.columns(2)
+
     with col_m:
-        mix_file = st.file_uploader("混用SKU映射表 (JSON)", type=["json"], key="mix_upload",
-            help="没有映射表也可以计算，未映射的SKU自动取'-'前部分")
-        mix_tpl = json.dumps([{"源SKU": "示例SKU-1", "相似SKU": "示例SKU"}], ensure_ascii=False, indent=2).encode("utf-8")
+        st.markdown("**混用SKU映射表**")
+        mix_file = st.file_uploader(
+            "上传映射表 (CSV 或 Excel)",
+            type=["csv", "xlsx", "xls"],
+            key="mix_upload",
+            help="需要包含列: 源SKU, 相似SKU。没有映射表也可以计算，未映射的SKU自动取'-'前部分"
+        )
+        if mix_file is not None:
+            try:
+                if mix_file.name.endswith(".csv"):
+                    try:
+                        mix_df = pd.read_csv(mix_file, encoding="utf-8-sig", dtype=str)
+                    except UnicodeDecodeError:
+                        mix_df = pd.read_csv(mix_file, encoding="gbk", dtype=str)
+                else:
+                    mix_df = pd.read_excel(mix_file, dtype=str)
+                st.session_state.mix_mapping = dict(zip(mix_df["源SKU"], mix_df["相似SKU"]))
+                st.caption(f"映射表已加载: {len(st.session_state.mix_mapping)} 条")
+            except Exception as e:
+                st.error(f"映射表读取失败: {e}")
+
+        mix_tpl_df = pd.DataFrame(columns=["源SKU", "相似SKU"])
+        mix_tpl_csv = mix_tpl_df.to_csv(index=False).encode("utf-8-sig")
         st.download_button(
             label="下载映射表模板",
-            data=mix_tpl,
-            file_name="混用SKU映射表模板.json",
-            mime="application/json",
+            data=mix_tpl_csv,
+            file_name="混用SKU映射表模板.csv",
+            mime="text/csv",
             key="mix_tpl_dl"
         )
+
     with col_b:
-        bench_file = st.file_uploader("基准表 (JSON)", type=["json"], key="bench_upload",
-            help="没有基准表也可以计算，系统会自动从上传数据计算全公司基准")
-        bench_tpl = json.dumps({
-            "室内外": [{"label": "室内", "观测数": 0, "收缩权重": 0, "基准_美西": 0.25, "基准_美东": 0.25, "基准_美南GA": 0.25, "基准_美南TX": 0.25}],
-            "一级分类": [{"label": "庭院、草坪与花园", "观测数": 0, "收缩权重": 0, "基准_美西": 0.25, "基准_美东": 0.25, "基准_美南GA": 0.25, "基准_美南TX": 0.25}],
-            "SPU": [{"label": "示例SPU", "观测数": 0, "收缩权重": 0, "基准_美西": 0.25, "基准_美东": 0.25, "基准_美南GA": 0.25, "基准_美南TX": 0.25}]
-        }, ensure_ascii=False, indent=2).encode("utf-8")
+        st.markdown("**基准表（Excel，含3个Sheet）**")
+        bench_file = st.file_uploader(
+            "上传基准表 (Excel)",
+            type=["xlsx", "xls"],
+            key="bench_upload",
+            help="需要3个Sheet: 室内外/一级分类/SPU。每个Sheet包含: label, 观测数, 收缩权重, 基准_美西, 基准_美东, 基准_美南GA, 基准_美南TX"
+        )
+        if bench_file is not None:
+            try:
+                bench_xl = pd.ExcelFile(bench_file)
+                benchmarks = {}
+                for sheet_name in ["室内外", "一级分类", "SPU"]:
+                    if sheet_name in bench_xl.sheet_names:
+                        benchmarks[sheet_name] = bench_xl.parse(sheet_name).to_dict("records")
+                st.session_state.benchmarks = benchmarks
+                st.caption(f"基准表已加载: {'/'.join([f'{k}={len(v)}条' for k, v in benchmarks.items()])}")
+            except Exception as e:
+                st.error(f"基准表读取失败: {e}")
+
+        bench_tpl_df = pd.DataFrame(columns=["label", "观测数", "收缩权重", "基准_美西", "基准_美东", "基准_美南GA", "基准_美南TX"])
+        bench_tpl_output = io.BytesIO()
+        with pd.ExcelWriter(bench_tpl_output, engine="openpyxl") as writer:
+            bench_tpl_df.to_excel(writer, sheet_name="室内外", index=False)
+            bench_tpl_df.to_excel(writer, sheet_name="一级分类", index=False)
+            bench_tpl_df.to_excel(writer, sheet_name="SPU", index=False)
         st.download_button(
             label="下载基准表模板",
-            data=bench_tpl,
-            file_name="基准表模板.json",
-            mime="application/json",
+            data=bench_tpl_output.getvalue(),
+            file_name="基准表模板.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             key="bench_tpl_dl"
         )
-
-    if mix_file is not None:
-        try:
-            st.session_state.mix_mapping = json.load(mix_file)
-            st.caption(f"映射表已加载: {len(st.session_state.mix_mapping)} 条")
-        except Exception as e:
-            st.error(f"映射表读取失败: {e}")
-
-    if bench_file is not None:
-        try:
-            st.session_state.benchmarks = json.load(bench_file)
-            st.caption(f"基准表已加载")
-        except Exception as e:
-            st.error(f"基准表读取失败: {e}")
 
 # 显示数据预览
 if st.session_state.df_raw is not None:
@@ -212,8 +290,7 @@ if st.session_state.df_raw is not None:
 
                 # 注入上传的映射表和基准表
                 if "mix_mapping" in st.session_state:
-                    mapping_list = st.session_state.mix_mapping
-                    engine.mix_mapping = {item["源SKU"]: item["相似SKU"] for item in mapping_list}
+                    engine.mix_mapping = st.session_state.mix_mapping
                 if "benchmarks" in st.session_state:
                     engine.benchmarks = st.session_state.benchmarks
 
@@ -224,6 +301,8 @@ if st.session_state.df_raw is not None:
                 engine.params["k"] = k_val
                 engine.params["a_min"] = a_min
                 engine.params["a_max"] = a_max
+                engine.params["alpha_trend"] = alpha_trend
+                engine.new_product_threshold = new_product_threshold
                 engine.params["seasonal_switch"] = 1 if seasonal_on else 0
                 engine.params["seasonal_beta"] = beta
                 engine.params["seasonal_window"] = seasonal_window
@@ -235,19 +314,23 @@ if st.session_state.df_raw is not None:
 
                 engine.df_raw["在目标期"] = engine.df_raw.apply(in_target_period, axis=1)
 
-                # 执行6步（不需要需求量，只算占比）
+                # 执行6步（demand=1 → 落货量=占比比例）
                 engine.step1_sku_mapping()
                 engine.step2_decay_weight()
                 engine.step3_seasonal_factor()
                 engine.step4_self_ratio()
                 engine.step5_benchmark()
-                df_results = engine.step6_final_ratio(demand_qty=1)  # demand=1 → 落货量=占比比例
+                df_results = engine.step6_final_ratio(demand_qty=1)
 
                 # 删除落货量列，只保留占比
                 drop_cols = [c for c in df_results.columns if c.startswith("落货量")]
                 df_results = df_results.drop(columns=drop_cols)
 
+                # 计算聚合层级占比
+                agg_results = compute_aggregate_ratios(df_results)
+
                 st.session_state.df_results = df_results
+                st.session_state.agg_results = agg_results
                 st.session_state.engine = engine
                 st.success(f"计算完成！共 {len(df_results)} 个SKU")
             except Exception as e:
@@ -258,37 +341,73 @@ else:
 
 
 # ============================================================
+# 辅助函数：计算聚合层级占比
+# ============================================================
+def compute_aggregate_ratios(df_sku):
+    """计算一级分类/室内外/SPU/全公司层面的分仓占比"""
+    wh_cols = {wh: f"最终_{wh}" for wh in WAREHOUSES}
+    agg_results = {}
+
+    for level_name, group_col in [("一级分类", "一级分类"), ("室内外", "室内外"), ("SPU", "SPU")]:
+        if group_col not in df_sku.columns:
+            continue
+        groups = df_sku.groupby(group_col).agg(
+            **{f"{wh}": (wh_cols[wh], "mean") for wh in WAREHOUSES}
+        ).reset_index()
+        groups.columns = [group_col] + [f"占比_{wh}" for wh in WAREHOUSES]
+        # 归一化
+        total = sum(groups[f"占比_{wh}"] for wh in WAREHOUSES)
+        for wh in WAREHOUSES:
+            groups[f"占比_{wh}"] = groups[f"占比_{wh}"] / total
+        groups.insert(1, "SKU数", df_sku.groupby(group_col).size().values)
+        agg_results[level_name] = groups
+
+    # 全公司
+    overall = {wh: df_sku[wh_cols[wh]].mean() for wh in WAREHOUSES}
+    total = sum(overall.values())
+    overall_df = pd.DataFrame([{
+        "层级": "全公司",
+        "SKU数": len(df_sku),
+        **{f"占比_{wh}": overall[wh] / total for wh in WAREHOUSES}
+    }])
+    agg_results["全公司"] = overall_df
+
+    return agg_results
+
+
+# ============================================================
 # 结果展示
 # ============================================================
 if st.session_state.df_results is not None:
-    st.subheader("3. 计算结果")
     df_r = st.session_state.df_results
 
     # --- KPI 卡片 ---
+    st.subheader("3. 计算结果")
     col1, col2, col3, col4 = st.columns(4)
     col1.metric("SKU 总数", f"{len(df_r)}")
     col2.metric("美西占比均值", f"{df_r['最终_美西'].mean():.1%}")
     col3.metric("美东占比均值", f"{df_r['最终_美东'].mean():.1%}")
     col4.metric("美南GA占比均值", f"{df_r['最终_美南GA'].mean():.1%}")
 
-    # --- 筛选 ---
+    # --- SKU级表格 ---
+    st.markdown("**SKU级分仓占比**")
+
     col_f1, col_f2 = st.columns([1, 3])
-
     with col_f1:
-        sku_filter = st.selectbox("查看单个SKU", ["全部"] + sorted(df_r["SKU"].tolist()))
-
+        sku_filter = st.selectbox("查看单个SKU", ["全部"] + sorted(df_r["SKU"].astype(str).tolist()))
     with col_f2:
-        cat_filter = st.multiselect("按品类筛选", sorted(df_r["一级分类"].unique()))
+        cat_filter = st.multiselect("按品类筛选", sorted(df_r["一级分类"].dropna().unique()))
 
     df_show = df_r.copy()
     if sku_filter != "全部":
-        df_show = df_show[df_show["SKU"] == sku_filter]
+        df_show = df_show[df_show["SKU"].astype(str) == sku_filter]
     if cat_filter:
         df_show = df_show[df_show["一级分类"].isin(cat_filter)]
 
-    # --- 表格 ---
     display_cols = [
-        "SKU", "SPU", "一级分类", "历史月数", "目标期月数", "收缩权重_a", "基准层级",
+        "SKU", "SPU", "一级分类", "室内外", "历史月数", "目标期月数", "收缩权重_a", "基准层级",
+        "自身_美西", "自身_美东", "自身_美南GA", "自身_美南TX",
+        "基准_美西", "基准_美东", "基准_美南GA", "基准_美南TX",
         "最终_美西", "最终_美东", "最终_美南GA", "最终_美南TX"
     ]
     display_cols = [c for c in display_cols if c in df_show.columns]
@@ -296,26 +415,43 @@ if st.session_state.df_results is not None:
     st.dataframe(
         df_show[display_cols].style.format({
             "收缩权重_a": "{:.3f}",
-            "最终_美西": "{:.2%}",
-            "最终_美东": "{:.2%}",
-            "最终_美南GA": "{:.2%}",
-            "最终_美南TX": "{:.2%}",
+            "自身_美西": "{:.2%}", "自身_美东": "{:.2%}",
+            "自身_美南GA": "{:.2%}", "自身_美南TX": "{:.2%}",
+            "基准_美西": "{:.2%}", "基准_美东": "{:.2%}",
+            "基准_美南GA": "{:.2%}", "基准_美南TX": "{:.2%}",
+            "最终_美西": "{:.2%}", "最终_美东": "{:.2%}",
+            "最终_美南GA": "{:.2%}", "最终_美南TX": "{:.2%}",
         }),
         use_container_width=True,
         height=400
     )
 
-    # --- 饼图 ---
+    # --- 聚合层级表格 ---
+    agg_results = st.session_state.get("agg_results", {})
+    if agg_results:
+        st.markdown("**聚合层级分仓占比**")
+        tab_names = ["一级分类", "室内外", "SPU", "全公司"]
+        tabs = st.tabs(tab_names)
+        for i, level in enumerate(tab_names):
+            if level in agg_results:
+                df_agg = agg_results[level]
+                fmt = {f"占比_{wh}": "{:.2%}" for wh in WAREHOUSES}
+                tabs[i].dataframe(
+                    df_agg.style.format(fmt),
+                    use_container_width=True
+                )
+
+    # --- 可视化 ---
     st.subheader("4. 可视化")
 
     chart_sku = st.selectbox(
         "选择SKU查看分仓占比",
-        sorted(df_r["SKU"].tolist()),
+        sorted(df_r["SKU"].astype(str).tolist()),
         key="chart_sku"
     )
 
     if chart_sku:
-        row = df_r[df_r["SKU"] == chart_sku].iloc[0]
+        row = df_r[df_r["SKU"].astype(str) == chart_sku].iloc[0]
         pie_data = pd.DataFrame({
             "仓库": WAREHOUSES,
             "占比": [row["最终_美西"], row["最终_美东"], row["最终_美南GA"], row["最终_美南TX"]],
@@ -354,7 +490,7 @@ if st.session_state.df_results is not None:
     colors = {"美西": "#4e79a7", "美东": "#f28e2b", "美南GA": "#e15759", "美南TX": "#76b7b2"}
     for wh in WAREHOUSES:
         fig_stack.add_trace(go.Bar(
-            x=df_top["SKU"],
+            x=df_top["SKU"].astype(str),
             y=df_top[f"最终_{wh}"],
             name=wh,
             marker_color=colors[wh]
@@ -373,15 +509,17 @@ if st.session_state.df_results is not None:
     # --- 导出 ---
     st.subheader("5. 导出结果")
 
-    col_exp1, col_exp2 = st.columns([1, 1])
+    col_exp1, col_exp2, col_exp3 = st.columns(3)
 
     with col_exp1:
         output = io.BytesIO()
         with pd.ExcelWriter(output, engine="openpyxl") as writer:
-            df_r.to_excel(writer, index=False, sheet_name="分仓占比")
-
+            df_r.to_excel(writer, index=False, sheet_name="SKU级占比")
+            for level in ["一级分类", "室内外", "SPU", "全公司"]:
+                if level in agg_results:
+                    agg_results[level].to_excel(writer, index=False, sheet_name=level)
         st.download_button(
-            label="下载 Excel 结果",
+            label="下载 Excel（含聚合）",
             data=output.getvalue(),
             file_name="分仓占比结果.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
@@ -391,12 +529,23 @@ if st.session_state.df_results is not None:
     with col_exp2:
         csv_output = df_r.to_csv(index=False).encode("utf-8-sig")
         st.download_button(
-            label="下载 CSV 结果",
+            label="下载 CSV（SKU级）",
             data=csv_output,
-            file_name="分仓占比结果.csv",
+            file_name="分仓占比结果_SKU级.csv",
             mime="text/csv",
             use_container_width=True
         )
+
+    with col_exp3:
+        if "一级分类" in agg_results:
+            csv_agg = agg_results["一级分类"].to_csv(index=False).encode("utf-8-sig")
+            st.download_button(
+                label="下载 CSV（一级分类）",
+                data=csv_agg,
+                file_name="分仓占比结果_一级分类.csv",
+                mime="text/csv",
+                use_container_width=True
+            )
 
 
 # ============================================================
