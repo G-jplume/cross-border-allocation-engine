@@ -136,7 +136,7 @@ if seasonal_on:
         min_value=1, max_value=3, value=1,
         help="目标月前N个月的数据算同季节。1=目标月前1个月，2=前2个月"
     )
-    st.sidebar.caption("窗口方向=含末（目标月作为末尾）。如6月发货+窗口1=增强5-6月数据")
+    st.sidebar.caption("窗口方向=含末（目标月作为末尾）。多月份目标期时，每个月各开窗口取并集")
 else:
     beta = 1.0
     seasonal_window = 1
