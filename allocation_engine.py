@@ -1,14 +1,27 @@
 """
-P1 计算引擎 - 分仓占比计算核心
-纯Python实现6步计算链路，与v6 Excel结果对比验证。
+分仓占比计算引擎 - 分仓占比计算核心
+纯Python实现计算链路，与v6 Excel结果对比验证。
 
-6步链路:
-1. 运算SKU映射 (VLOOKUP + TEXTBEFORE fallback)
-2. 时间衰减加权 (w = λ^|anchor - month_seq|)
-3. 季节因子 (V = β if matching month+category, else 1)
-4. 自身占比 (SUMIFS by 运算SKU / SUMIFS total)
-5. 基准占比 (SPU → 一级分类 → 室内外 → 全公司 fallback + Bayesian shrinkage)
-6. 最终占比 (a×自身 + (1-a)×基准) + 落货量
+计算链路（7步）:
+1. 运算SKU映射       (VLOOKUP + TEXTBEFORE fallback)
+2. 时间衰减加权       (w = λ^|anchor - month_seq|)
+3. 季节匹配因子       (V = β if 同季节+适用品类, else 1)
+4. 自身占比           (SUMIFS by 运算SKU / SUMIFS total)
+5. 基准占比           (SPU → 一级分类 → 室内外 → 全公司 回退 + 品类层贝叶斯收缩)
+6. 最终占比           (a×自身 + (1-a)×基准) + 趋势调整(α, 上限cap) + 归一化
+7. 落货量             (占比×需求量, 最大余额法保证整数合计精确)
+
+参数生效层级说明:
+┌────────────────────┬──────────────┬──────────────────────────────┐
+│ 参数               │ 作用层级     │ 说明                          │
+├────────────────────┼──────────────┼──────────────────────────────┤
+│ lambda 衰减速度    │ 原始数据加权 │ 全局，所有品类                │
+│ seasonal_* 季节因子│ 原始数据加权 │ 仅适用品类，与衰减相乘        │
+│ alpha_trend 趋势α  │ 最终占比     │ 归一化前叠加趋势差            │
+│ trend_cap 调整上限 │ 最终占比     │ 单仓趋势调整幅度上限          │
+│ k 收缩强度         │ SKU 层混合   │ 自身 vs 基准                  │
+│ k_cat 观测数       │ 基准层混合   │ 子层 vs 父层                  │
+└────────────────────┴──────────────┴──────────────────────────────┘
 """
 import pandas as pd
 import numpy as np
@@ -33,6 +46,13 @@ class AllocationEngine:
         self.sku_weighted = None
         self.sku_benchmarks = None
         self.benchmarks = self._load_benchmarks()
+        # 品类层最小等效观测数（贝叶斯收缩虚拟样本量）
+        self.k_cat = float(self.params.get("k_cat", 12.0))
+        # 季节适用品类（None 表示使用 params 里的默认值）
+        self.seasonal_categories = None
+        # 趋势窗口（None 表示按 anchor 自动推导）
+        self.trend_recent = None
+        self.trend_far = None
 
     # 默认参数（文件不存在时使用）
     DEFAULT_PARAMS = {
@@ -44,15 +64,19 @@ class AllocationEngine:
         "far_start": None, "far_end": None,
         "seasonal_switch": 1, "seasonal_window": 1,
         "seasonal_beta": 3.0,
-        "seasonal_cat1": "庭院、草坪与花园",
-        "seasonal_cat2": "庭院",
+        "seasonal_categories": "庭院、草坪与花园,庭院",
+        "k_cat": 12.0,
+        "norm_method": "proportional",
     }
 
     def _load_params(self):
         path = os.path.join(self.data_dir, "params.json")
         if os.path.exists(path):
             with open(path, "r", encoding="utf-8") as f:
-                return json.load(f)
+                p = json.load(f)
+            merged = dict(self.DEFAULT_PARAMS)
+            merged.update(p)
+            return merged
         return dict(self.DEFAULT_PARAMS)
 
     def _load_mix_mapping(self):
@@ -81,7 +105,61 @@ class AllocationEngine:
         print(f"Loaded {len(self.df_raw)} rows from Sheet2")
         return self.df_raw
 
+    # =========================================================
+    # 辅助：目标期 / 季节窗口 / 趋势窗口
+    # =========================================================
+    def _get_seasonal_categories(self):
+        """返回季节适用的品类列表。优先用外部注入，其次用 params 配置。"""
+        if self.seasonal_categories is not None:
+            return list(self.seasonal_categories)
+        raw = self.params.get("seasonal_categories", "")
+        if isinstance(raw, (list, tuple)):
+            return [str(c) for c in raw]
+        return [c.strip() for c in str(raw).split(",") if c.strip()]
+
+    def _get_anchor_month(self):
+        anchor = int(self.params["anchor"])
+        return (anchor - 1) % 12 + 1
+
+    def _get_target_months(self):
+        """目标期包含的月份列表（1-12）。"""
+        if self.df_raw is not None and "在目标期" in self.df_raw.columns:
+            tm = sorted(self.df_raw.loc[self.df_raw["在目标期"] == 1, "月"].dropna().unique())
+            if len(tm) > 0:
+                return [int(m) for m in tm]
+        return [self._get_anchor_month()]
+
+    def _resolve_trend_windows(self):
+        """推导趋势的近期/远期月份序号区间。
+
+        默认策略：以目标期（月数宽度 w）为基准，取
+          近期 = 目标期向前平移 1 年
+          远期 = 目标期向前平移 2 年
+        返回 (recent_lo, recent_hi, far_lo, far_hi) 或 None。
+        """
+        if self.trend_recent is not None and self.trend_far is not None:
+            return (*self.trend_recent, *self.trend_far)
+
+        rs, re_ = self.params.get("recent_start"), self.params.get("recent_end")
+        fs, fe = self.params.get("far_start"), self.params.get("far_end")
+        if rs and re_ and fs and fe:
+            return int(rs), int(re_), int(fs), int(fe)
+
+        # 自动推导：以目标期月份集合构造区间
+        months = self._get_target_months()
+        if not months:
+            return None
+        anchor = int(self.params["anchor"])
+        width = len(months)
+        # 目标期起始月序号 = anchor - width + 1（假设连续月份）
+        target_start_seq = anchor - width + 1
+        recent_lo, recent_hi = target_start_seq - 12, anchor - 12
+        far_lo, far_hi = target_start_seq - 24, anchor - 24
+        return recent_lo, recent_hi, far_lo, far_hi
+
+    # =========================================================
     # Step 1: 运算SKU映射
+    # =========================================================
     def step1_sku_mapping(self):
         df = self.df_raw.copy()
 
@@ -101,14 +179,23 @@ class AllocationEngine:
         self.df_raw = df
         return df
 
+    # =========================================================
     # Step 2: 时间衰减加权
+    # =========================================================
     def step2_decay_weight(self):
         df = self.df_raw.copy()
         anchor = self.params["anchor"]
         lambda_val = self.params["lambda"]
 
         df["月份序号_py"] = df["年"] * 12 + df["月"]
-        df["衰减权重_py"] = lambda_val ** (abs(anchor - df["月份序号_py"]))
+        # 衰减权重只作用于【目标期】内的月份：目标期以外（含未来月份）权重一律为 0。
+        # 目标期内的月份再按 λ^(anchor - month) 做时间衰减。
+        # 注意：不能用 λ^|anchor-month|，那会把目标期外的数据也算进自身占比。
+        dist = anchor - df["月份序号_py"]
+        in_target = df["在目标期"] == 1 if "在目标期" in df.columns else pd.Series(True, index=df.index)
+        df["衰减权重_py"] = np.where(
+            in_target, lambda_val ** dist.clip(lower=0), 0.0
+        )
 
         if "在目标期" in df.columns:
             df["在目标期_py"] = df["在目标期"]
@@ -121,31 +208,33 @@ class AllocationEngine:
         self.df_raw = df
         return df
 
-    # Step 3: 季节因子
+    # =========================================================
+    # Step 3: 季节匹配因子
+    # =========================================================
     def step3_seasonal_factor(self):
         df = self.df_raw.copy()
         switch = self.params["seasonal_switch"]
-        window = self.params["seasonal_window"]
+        window = int(self.params["seasonal_window"])
         beta = self.params["seasonal_beta"]
-        cat1 = self.params["seasonal_cat1"]
-        cat2 = self.params["seasonal_cat2"]
-        anchor = self.params["anchor"]
-        anchor_month = (int(anchor) - 1) % 12 + 1
+        cats = self._get_seasonal_categories()
 
-        def window_end_dist(m, target, win):
-            return (target - m) % 12 <= win
+        def in_season(m, target, win):
+            """判定月份 m 是否落在目标月 target 的"前置季节窗口"内。
 
-        if "在目标期" in df.columns:
-            target_rows = df[df["在目标期"] == 1]
-            target_months = sorted(target_rows["月"].unique())
-        else:
-            target_months = [anchor_month]
+            窗口定义为 [target-win, target-1]（目标月本身不计入），
+            距离按环形计算，所以 1 月发货、窗口=1 时命中 12 月。
+            这与 Excel 模板一致：目标期 {1,2,3}、窗口=1 时命中月份为 {12, 1, 2}。
+            """
+            d = (target - 1 - m) % 12
+            return 0 <= d <= (win - 1)
 
-        if switch == 1:
+        target_months = self._get_target_months()
+
+        if switch == 1 and cats:
             df["季节因子_py"] = 1.0
-            mask = df["一级分类"].isin([cat1, cat2]) & \
+            mask = df["一级分类"].isin(cats) & \
                    df["月"].apply(lambda m: any(
-                       window_end_dist(m, tm, window) for tm in target_months
+                       in_season(m, tm, window) for tm in target_months
                    ))
             df.loc[mask, "季节因子_py"] = beta
         else:
@@ -155,16 +244,27 @@ class AllocationEngine:
             mismatches = df[abs(df["季节因子_py"] - df["季节因子_V"]) > 0.01]
             print(f"  Step3: seasonal factor mismatches vs Excel: {len(mismatches)}")
 
+        n_boosted = int((df["季节因子_py"] > 1).sum())
+        print(f"  Step3: categories={cats}, window=±{window}, beta={beta}, "
+              f"boosted rows={n_boosted}/{len(df)}")
+
         self.df_raw = df
         return df
 
+    # =========================================================
     # Step 4: 自身占比
-    def step4_self_ratio(self):
-        df = self.df_raw.copy()
-
+    # =========================================================
+    def _add_weighted_cols(self):
+        """加权列 = 衰减权重 × 季节因子 × 原始量。"""
+        df = self.df_raw
         for wh in WAREHOUSES:
             df[f"加权_{wh}_py"] = df["衰减权重_py"] * df["季节因子_py"] * df[wh]
         df["加权合计_py"] = df["衰减权重_py"] * df["季节因子_py"] * df[WAREHOUSES].sum(axis=1)
+        self.df_raw = df
+        return df
+
+    def step4_self_ratio(self):
+        df = self._add_weighted_cols()
 
         target_df = df[df["在目标期_py"] == 1].copy()
         grouped = target_df.groupby("运算SKU_py")
@@ -191,15 +291,31 @@ class AllocationEngine:
         self.sku_weighted = sku_weighted
         return sku_weighted
 
-    # Step 5: 基准占比
+    # =========================================================
+    # Step 5: 基准占比（含品类层贝叶斯收缩）
+    # =========================================================
+    def _shrink(self, child_ratios, child_n, parent_ratios, k_cat):
+        """贝叶斯收缩：child_n/(child_n+k)×子层 + k/(child_n+k)×父层。
+
+        k_cat 即"最小等效观测数"——把父层均值的可信度折算成 k_cat 个虚拟观测。
+        k_cat 越大越保守（子层样本少时被拉向父层）。
+        """
+        if child_n <= 0:
+            return dict(parent_ratios)
+        w = child_n / (child_n + k_cat)
+        return {wh: w * child_ratios.get(wh, 0.0) + (1 - w) * parent_ratios.get(wh, 0.0)
+                for wh in WAREHOUSES}
+
     def step5_benchmark(self):
+        k_cat = float(self.k_cat)
         spu_bm = {bm["label"]: bm for bm in self.benchmarks.get("SPU", [])}
         cat_bm = {bm["label"]: bm for bm in self.benchmarks.get("一级分类", [])}
         indoor_bm = {bm["label"]: bm for bm in self.benchmarks.get("室内外", [])}
 
         all_target = self.df_raw[self.df_raw["在目标期_py"] == 1]
         overall_total = all_target[WAREHOUSES].sum(axis=1).sum()
-        overall_ratios = {wh: all_target[wh].sum() / overall_total for wh in WAREHOUSES} if overall_total > 0 else {wh: 0.25 for wh in WAREHOUSES}
+        overall_ratios = ({wh: all_target[wh].sum() / overall_total for wh in WAREHOUSES}
+                          if overall_total > 0 else {wh: 0.25 for wh in WAREHOUSES})
 
         df = self.df_raw
         sku_info = {}
@@ -213,7 +329,8 @@ class AllocationEngine:
                 "室内外": rows["室内外"].iloc[0],
             }
 
-        def compute_group_benchmark(group_col):
+        def compute_group_obs(group_col):
+            """按分组的原始观测占比 + 观测数（不做收缩）。"""
             grouped = all_target.groupby(group_col)
             bm = {}
             for label, group in grouped:
@@ -221,15 +338,45 @@ class AllocationEngine:
                 total = sum(wh_sums.values())
                 if total == 0:
                     continue
-                entry = {"观测数": len(group)}
-                for wh in WAREHOUSES:
-                    entry[f"基准_{wh}"] = wh_sums[wh] / total
-                bm[label] = entry
+                bm[label] = {
+                    "观测数": len(group),
+                    "观测占比": {wh: wh_sums[wh] / total for wh in WAREHOUSES},
+                }
             return bm
 
-        spu_auto = compute_group_benchmark("SPU")
-        cat_auto = compute_group_benchmark("一级分类")
-        indoor_auto = compute_group_benchmark("室内外")
+        spu_obs = compute_group_obs("SPU")
+        cat_obs = compute_group_obs("一级分类")
+        indoor_obs = compute_group_obs("室内外")
+
+        # --- 建立收缩后的基准表 ---
+        # 一级分类基准 = shrink(品类观测, n, 全公司)
+        cat_shrunk = {}
+        for label, o in cat_obs.items():
+            cat_shrunk[label] = {
+                "观测数": o["观测数"],
+                "基准": self._shrink(o["观测占比"], o["观测数"], overall_ratios, k_cat),
+            }
+        # 室内外基准 = shrink(室内外观测, n, 全公司)
+        indoor_shrunk = {}
+        for label, o in indoor_obs.items():
+            indoor_shrunk[label] = {
+                "观测数": o["观测数"],
+                "基准": self._shrink(o["观测占比"], o["观测数"], overall_ratios, k_cat),
+            }
+        # SPU 基准 = shrink(SPU观测, n, 所属一级分类收缩后基准)
+        spu_shrunk = {}
+        for label, o in spu_obs.items():
+            # 找到该 SPU 所属一级分类
+            pc = None
+            sub = all_target[all_target["SPU"] == label]
+            if len(sub) > 0:
+                pc = sub["一级分类"].iloc[0]
+            parent = cat_shrunk.get(pc, {}).get("基准", overall_ratios) if pc else overall_ratios
+            spu_shrunk[label] = {
+                "观测数": o["观测数"],
+                "基准": self._shrink(o["观测占比"], o["观测数"], parent, k_cat),
+                "父层": pc or "全公司",
+            }
 
         sku_benchmarks = {}
         for sku, info in sku_info.items():
@@ -237,81 +384,135 @@ class AllocationEngine:
             cat1 = info["一级分类"]
             indoor = info["室内外"]
             used_level = "全公司"
-            bm_ratios = overall_ratios.copy()
+            bm_ratios = dict(overall_ratios)
+            bm_n = overall_total
+            bm_parent = "—"
 
             if spu and spu in spu_bm and spu_bm[spu].get("观测数", 0) > 0:
                 bm = spu_bm[spu]
                 bm_ratios = {wh: bm[f"基准_{wh}"] for wh in WAREHOUSES}
                 used_level = "SPU(预存)"
-            elif spu and spu in spu_auto and spu_auto[spu]["观测数"] > 0:
-                bm = spu_auto[spu]
-                bm_ratios = {wh: bm[f"基准_{wh}"] for wh in WAREHOUSES}
+                bm_n = bm.get("观测数")
+            elif spu and spu in spu_shrunk:
+                bm_ratios = spu_shrunk[spu]["基准"]
+                bm_n = spu_shrunk[spu]["观测数"]
+                bm_parent = spu_shrunk[spu]["父层"]
                 used_level = "SPU"
             elif cat1 and cat1 in cat_bm and cat_bm[cat1].get("观测数", 0) > 0:
                 bm = cat_bm[cat1]
                 bm_ratios = {wh: bm[f"基准_{wh}"] for wh in WAREHOUSES}
                 used_level = "一级分类(预存)"
-            elif cat1 and cat1 in cat_auto and cat_auto[cat1]["观测数"] > 0:
-                bm = cat_auto[cat1]
-                bm_ratios = {wh: bm[f"基准_{wh}"] for wh in WAREHOUSES}
+                bm_n = bm.get("观测数")
+            elif cat1 and cat1 in cat_shrunk:
+                bm_ratios = cat_shrunk[cat1]["基准"]
+                bm_n = cat_shrunk[cat1]["观测数"]
+                bm_parent = "全公司"
                 used_level = "一级分类"
             elif indoor and indoor in indoor_bm and indoor_bm[indoor].get("观测数", 0) > 0:
                 bm = indoor_bm[indoor]
                 bm_ratios = {wh: bm[f"基准_{wh}"] for wh in WAREHOUSES}
                 used_level = "室内外(预存)"
-            elif indoor and indoor in indoor_auto and indoor_auto[indoor]["观测数"] > 0:
-                bm = indoor_auto[indoor]
-                bm_ratios = {wh: bm[f"基准_{wh}"] for wh in WAREHOUSES}
+                bm_n = bm.get("观测数")
+            elif indoor and indoor in indoor_shrunk:
+                bm_ratios = indoor_shrunk[indoor]["基准"]
+                bm_n = indoor_shrunk[indoor]["观测数"]
+                bm_parent = "全公司"
                 used_level = "室内外"
 
             sku_benchmarks[sku] = {
                 "benchmark": bm_ratios,
                 "level": used_level,
                 "info": info,
+                "benchmark_n": bm_n,
+                "benchmark_parent": bm_parent,
             }
 
-        print(f"  Step5: computed benchmarks for {len(sku_benchmarks)} SKUs")
+        print(f"  Step5: computed benchmarks for {len(sku_benchmarks)} SKUs "
+              f"(k_cat={k_cat:g} 品类层收缩)")
         self.sku_benchmarks = sku_benchmarks
+        self._cat_shrunk = cat_shrunk
+        self._spu_shrunk = spu_shrunk
+        self._indoor_shrunk = indoor_shrunk
         return sku_benchmarks
 
-    # Step 6: 最终占比 + 落货量
-    def step6_final_ratio(self, demand_qty=3000):
+    # =========================================================
+    # Step 6: 趋势调整 + 最终占比
+    # =========================================================
+    def step6_final_ratio(self, demand_qty=1, apply_trend=True):
         k = self.params["k"]
         a_min = self.params["a_min"]
         a_max = self.params["a_max"]
         new_threshold = self.new_product_threshold
+        alpha = float(self.params.get("alpha_trend", 0.3) or 0.0)
+        cap = float(self.params.get("trend_cap", 0.05) or 0.0)
+
+        df = self.df_raw
+        windows = self._resolve_trend_windows() if apply_trend and alpha > 0 else None
+        trend_used = windows is not None
+
+        if trend_used:
+            r_lo, r_hi, f_lo, f_hi = windows
+            print(f"  Step6: trend windows recent=[{r_lo},{r_hi}] far=[{f_lo},{f_hi}] "
+                  f"α={alpha} cap=±{cap}")
+        else:
+            print(f"  Step6: trend disabled (α={alpha})")
+
+        # 预先按 运算SKU 建索引，避免循环里反复切片
+        df_by_sku = dict(tuple(df.groupby("运算SKU_py")))
 
         results = []
         for sku in self.sku_weighted:
             sw = self.sku_weighted[sku]
-            sb = self.sku_benchmarks.get(sku, {"benchmark": {wh: 0.25 for wh in WAREHOUSES}, "level": "全公司", "info": {}})
+            sb = self.sku_benchmarks.get(
+                sku,
+                {"benchmark": {wh: 0.25 for wh in WAREHOUSES}, "level": "全公司", "info": {}}
+            )
 
             n = sw["target_months"]
             history = sw["history_months"]
 
-            # New product logic: if history months <= threshold, a=0 (use benchmark only)
+            # 新品：历史出单月数 <= 阈值 → 完全用基准
             if history <= new_threshold:
                 a = 0.0
             else:
                 a_raw = n / (n + k) if (n + k) > 0 else 0
                 a = min(a_max, max(a_min, a_raw))
 
-            final = {}
-            for wh in WAREHOUSES:
-                final[wh] = a * sw["self_ratios"][wh] + (1 - a) * sb["benchmark"][wh]
+            final = {wh: a * sw["self_ratios"][wh] + (1 - a) * sb["benchmark"][wh]
+                     for wh in WAREHOUSES}
 
+            # 归一化（保证四仓合计 = 1）
             total_final = sum(final.values())
             if total_final > 0:
                 final = {wh: v / total_final for wh, v in final.items()}
 
-            allocation = {}
-            for wh in WAREHOUSES:
-                allocation[wh] = round(final[wh] * demand_qty)
-            allocated_total = sum(allocation.values())
-            diff = demand_qty - allocated_total
-            if diff != 0:
-                max_wh = max(allocation, key=allocation.get)
-                allocation[max_wh] += diff
+            # --- 趋势调整 ---
+            trend_diff = {wh: 0.0 for wh in WAREHOUSES}
+            adjusted = dict(final)
+            if trend_used and sku in df_by_sku:
+                g = df_by_sku[sku]
+                rec = g[g["月份序号_py"].between(r_lo, r_hi)]
+                far = g[g["月份序号_py"].between(f_lo, f_hi)]
+                rec_den = rec["加权合计_py"].sum() if len(rec) else 0
+                far_den = far["加权合计_py"].sum() if len(far) else 0
+                if rec_den > 0 and far_den > 0:
+                    for wh in WAREHOUSES:
+                        rr = rec[f"加权_{wh}_py"].sum() / rec_den
+                        fr = far[f"加权_{wh}_py"].sum() / far_den
+                        d = rr - fr
+                        trend_diff[wh] = d
+                        # 单仓调整幅度限制在 ±cap
+                        adjusted[wh] = final[wh] + alpha * max(-cap, min(cap, d))
+                    # 调整后是否重新归一化
+                    #   normalized  : 四仓合计恒为 100%（默认，符合"占比必须等于100%"的要求）
+                    #   raw         : 保留原始调整值（与 Excel 模板 AS 列一致，合计可能 0.97~1.03）
+                    if self.params.get("norm_method", "proportional") != "raw":
+                        adj_total = sum(adjusted.values())
+                        if adj_total > 0:
+                            adjusted = {wh: v / adj_total for wh, v in adjusted.items()}
+
+            # --- 落货量：最大余额法，整数合计精确等于需求量 ---
+            allocation = self._allocate_integer(adjusted, demand_qty)
 
             results.append({
                 "SKU": sku,
@@ -322,6 +523,8 @@ class AllocationEngine:
                 "目标期月数": sw["target_months"],
                 "收缩权重_a": a,
                 "基准层级": sb["level"],
+                "基准观测数": sb.get("benchmark_n", ""),
+                "基准父层": sb.get("benchmark_parent", ""),
                 "自身_美西": sw["self_ratios"]["美西"],
                 "自身_美东": sw["self_ratios"]["美东"],
                 "自身_美南GA": sw["self_ratios"]["美南GA"],
@@ -334,6 +537,15 @@ class AllocationEngine:
                 "最终_美东": final["美东"],
                 "最终_美南GA": final["美南GA"],
                 "最终_美南TX": final["美南TX"],
+                "趋势差_美西": trend_diff["美西"],
+                "趋势差_美东": trend_diff["美东"],
+                "趋势差_美南GA": trend_diff["美南GA"],
+                "趋势差_美南TX": trend_diff["美南TX"],
+                "调整后_美西": adjusted["美西"],
+                "调整后_美东": adjusted["美东"],
+                "调整后_美南GA": adjusted["美南GA"],
+                "调整后_美南TX": adjusted["美南TX"],
+                "调整后合计": sum(adjusted.values()),
                 "落货量_美西": allocation["美西"],
                 "落货量_美东": allocation["美东"],
                 "落货量_美南GA": allocation["美南GA"],
@@ -344,7 +556,68 @@ class AllocationEngine:
         print(f"  Step6: computed final ratios for {len(df_results)} SKUs")
         return df_results
 
-    # Verify against Excel
+    @staticmethod
+    def _allocate_integer(ratios, qty):
+        """最大余额法：按占比分配整数，保证合计精确等于 qty。"""
+        if qty <= 0:
+            return {wh: 0 for wh in WAREHOUSES}
+        raw = {wh: ratios.get(wh, 0.0) * qty for wh in WAREHOUSES}
+        floor = {wh: int(np.floor(raw[wh])) for wh in WAREHOUSES}
+        remainder = qty - sum(floor.values())
+        if remainder > 0:
+            # 按小数部分从大到小补足
+            order = sorted(WAREHOUSES, key=lambda w: (raw[w] - floor[w]), reverse=True)
+            for i in range(remainder):
+                floor[order[i % len(order)]] += 1
+        return floor
+
+    # =========================================================
+    # 自检：环形距离 / 占比合计 / 参数生效
+    # =========================================================
+    def self_check(self, df_results=None):
+        """返回自检结果列表 [(项目, 状态, 说明)]。
+
+        覆盖三个易错点：
+        1. 四仓占比合计是否恒为 100%
+        2. 趋势因子 α 是否真正生效
+        3. 季节因子是否命中了任何行（品类名不匹配会静默失效）
+        """
+        checks = []
+
+        if df_results is not None and len(df_results):
+            for col, label in [("最终", "最终占比"), ("调整后", "调整后占比")]:
+                cols = [f"{col}_{wh}" for wh in WAREHOUSES]
+                if all(c in df_results.columns for c in cols):
+                    tot = df_results[cols].sum(axis=1)
+                    dev = (tot - 1.0).abs().max()
+                    ok = dev < 1e-9
+                    checks.append((f"{label}四仓合计=100%", ok,
+                                   f"最大偏差 {dev:.2e}"))
+
+        if self.df_raw is not None and "季节因子_py" in self.df_raw.columns:
+            n = int((self.df_raw["季节因子_py"] > 1).sum())
+            cats = self._get_seasonal_categories()
+            checks.append(("季节因子命中行数", n > 0,
+                           f"命中 {n} 行（适用品类: {cats}）" if n > 0
+                           else f"0 行命中！适用品类 {cats} 与数据的『一级分类』不匹配，季节因子实际未生效"))
+
+        alpha = float(self.params.get("alpha_trend", 0) or 0)
+        if df_results is not None and len(df_results) and "趋势差_美西" in df_results.columns:
+            if alpha <= 0:
+                checks.append(("趋势因子 α", True, "α=0，已按预期关闭"))
+            else:
+                nz = int((df_results[[f"趋势差_{w}" for w in WAREHOUSES]]
+                          .abs().sum(axis=1) > 0).sum())
+                checks.append(("趋势因子 α 生效", nz > 0,
+                               f"{nz}/{len(df_results)} 个SKU取到趋势差（α={alpha}）"
+                               if nz > 0 else
+                               f"0 个SKU取到趋势差！历史数据不足以覆盖去年同期，趋势因子未生效"))
+
+        return checks
+
+    # =========================================================
+    # 验证（与 Excel 结果对比）
+    # =========================================================
     def verify(self, df_py):
         df_xl = pd.read_csv(
             os.path.join(self.data_dir, "sheet5_results.csv"),
@@ -381,23 +654,26 @@ class AllocationEngine:
             status = "PASS" if max_diff < 0.001 else "FAIL"
             if status == "FAIL":
                 all_pass = False
-            print(f"  {py_col} vs {xl_col}: max_diff={max_diff:.6f}, mean={mean_diff:.6f}, match={count_match}/{len(merged)} [{status}]")
+            print(f"  {py_col} vs {xl_col}: max_diff={max_diff:.6f}, mean={mean_diff:.6f}, "
+                  f"match={count_match}/{len(merged)} [{status}]")
             if status == "FAIL":
                 worst = merged.loc[diff.idxmax()]
-                print(f"    Worst: SKU={worst['SKU']}, Python={worst[py_col]:.6f}, Excel={worst[xl_col]:.6f}")
+                print(f"    Worst: SKU={worst['SKU']}, Python={worst[py_col]:.6f}, "
+                      f"Excel={worst[xl_col]:.6f}")
 
         print(f"\n  Sample (first 5 SKUs):")
         print(f"  {'SKU':>20} {'Py_美西':>10} {'Xl_美西':>10} {'Diff':>10}")
         for _, row in merged.head().iterrows():
             d = row.get("最终_美西", 0) - row.get("最终_美西_R", 0)
-            print(f"  {row['SKU']:>20} {row.get('最终_美西',0):>10.6f} {row.get('最终_美西_R',0):>10.6f} {d:>10.6f}")
+            print(f"  {row['SKU']:>20} {row.get('最终_美西',0):>10.6f} "
+                  f"{row.get('最终_美西_R',0):>10.6f} {d:>10.6f}")
 
         return all_pass
 
 
 def main():
     print("=" * 60)
-    print("P1 计算引擎 - 分仓占比计算")
+    print("分仓占比计算引擎")
     print("=" * 60)
 
     engine = AllocationEngine()
@@ -421,12 +697,16 @@ def main():
     print("\n--- Step 6: 最终占比 ---")
     df_results = engine.step6_final_ratio()
 
+    print("\n--- 自检 ---")
+    for name, ok, msg in engine.self_check(df_results):
+        print(f"  [{'OK' if ok else '!!'}] {name}: {msg}")
+
     print("\n--- 验证对比 ---")
     all_pass = engine.verify(df_results)
 
     print(f"\n{'='*60}")
     if all_pass:
-        print("P1 计算引擎验证通过: Python结果与Excel一致")
+        print("验证通过: Python结果与Excel一致")
     else:
         print("存在差异，需要排查")
     print(f"{'='*60}")
