@@ -111,3 +111,24 @@ engine.verify(df_results)
 - [ ] P2: Streamlit UI（上传+参数+结果看板）
 - [ ] P3: 可视化（品类分析、季节诊断、趋势图）
 - [ ] P4: 导出Excel + 部署
+
+
+## Streamlit Web App (P2)
+
+已实现 Web 界面，支持文件上传、参数调节、可视化、导出。
+
+### 启动方式
+
+```bash
+pip install streamlit plotly openpyxl
+streamlit run app.py
+```
+
+### 功能
+
+- 文件上传 (CSV/Excel，自动处理编码)
+- 侧边栏参数面板 (目标期、λ、k、季节因子等)
+- 一键计算 (6步链路)
+- 结果表格 (筛选/排序)
+- 可视化 (饼图/柱状图/堆叠图)
+- 导出 Excel/CSV
