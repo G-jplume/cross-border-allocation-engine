@@ -1,0 +1,21 @@
+{
+  "anchor": 24325.0,
+  "lambda": 0.85,
+  "k": 6.0,
+  "a_min": 0.0,
+  "a_max": 0.9,
+  "target_type": 1.0,
+  "target_start": 1.0,
+  "target_end": 3.0,
+  "alpha_trend": 0.3,
+  "trend_cap": 0.05,
+  "recent_start": 24313.0,
+  "recent_end": 24315.0,
+  "far_start": 24301.0,
+  "far_end": 24303.0,
+  "seasonal_switch": 1.0,
+  "seasonal_window": 1.0,
+  "seasonal_beta": 3.0,
+  "seasonal_cat1": "庭院、草坪与花园",
+  "seasonal_cat2": "庭院"
+}
