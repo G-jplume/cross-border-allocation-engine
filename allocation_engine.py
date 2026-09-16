@@ -132,14 +132,14 @@ class AllocationEngine:
         anchor = self.params["anchor"]
         anchor_month = (int(anchor) - 1) % 12 + 1
 
-        def circ_dist(m1, m2):
-            d = abs(m1 - m2)
-            return min(d, 12 - d)
+        def window_end_dist(m, target, win):
+            """含末方向：目标月作为窗口末尾，月份在[target-win, target]范围内返回True"""
+            return (target - m) % 12 <= win
 
         if switch == 1:
             df["季节因子_py"] = 1.0
             mask = df["一级分类"].isin([cat1, cat2]) & \
-                   df["月"].apply(lambda m: circ_dist(m, anchor_month) <= window)
+                   df["月"].apply(lambda m: window_end_dist(m, anchor_month, window))
             df.loc[mask, "季节因子_py"] = beta
         else:
             df["季节因子_py"] = 1.0
