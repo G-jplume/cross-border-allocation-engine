@@ -199,12 +199,11 @@ elif use_sample:
     else:
         st.warning("示例数据文件不存在，请上传数据。")
 
-# --- 可选：上传映射表和基准表（CSV/Excel格式） ---
-with st.expander("可选：上传混用SKU映射表 / 基准表", expanded=False):
-    col_m, col_b = st.columns(2)
+# --- 可选：上传混用SKU映射表 ---
+with st.expander("可选：上传混用SKU映射表", expanded=False):
+    col_m, col_tpl2 = st.columns([3, 1])
 
     with col_m:
-        st.markdown("**混用SKU映射表**")
         mix_file = st.file_uploader(
             "上传映射表 (CSV 或 Excel)",
             type=["csv", "xlsx", "xls"],
@@ -225,48 +224,15 @@ with st.expander("可选：上传混用SKU映射表 / 基准表", expanded=False
             except Exception as e:
                 st.error(f"映射表读取失败: {e}")
 
+    with col_tpl2:
         mix_tpl_df = pd.DataFrame(columns=["源SKU", "相似SKU"])
         mix_tpl_csv = mix_tpl_df.to_csv(index=False).encode("utf-8-sig")
         st.download_button(
-            label="下载映射表模板",
+            label="下载模板",
             data=mix_tpl_csv,
             file_name="混用SKU映射表模板.csv",
             mime="text/csv",
             key="mix_tpl_dl"
-        )
-
-    with col_b:
-        st.markdown("**基准表（Excel，含3个Sheet）**")
-        bench_file = st.file_uploader(
-            "上传基准表 (Excel)",
-            type=["xlsx", "xls"],
-            key="bench_upload",
-            help="需要3个Sheet: 室内外/一级分类/SPU。每个Sheet包含: label, 观测数, 收缩权重, 基准_美西, 基准_美东, 基准_美南GA, 基准_美南TX"
-        )
-        if bench_file is not None:
-            try:
-                bench_xl = pd.ExcelFile(bench_file)
-                benchmarks = {}
-                for sheet_name in ["室内外", "一级分类", "SPU"]:
-                    if sheet_name in bench_xl.sheet_names:
-                        benchmarks[sheet_name] = bench_xl.parse(sheet_name).to_dict("records")
-                st.session_state.benchmarks = benchmarks
-                st.caption(f"基准表已加载: {'/'.join([f'{k}={len(v)}条' for k, v in benchmarks.items()])}")
-            except Exception as e:
-                st.error(f"基准表读取失败: {e}")
-
-        bench_tpl_df = pd.DataFrame(columns=["label", "观测数", "收缩权重", "基准_美西", "基准_美东", "基准_美南GA", "基准_美南TX"])
-        bench_tpl_output = io.BytesIO()
-        with pd.ExcelWriter(bench_tpl_output, engine="openpyxl") as writer:
-            bench_tpl_df.to_excel(writer, sheet_name="室内外", index=False)
-            bench_tpl_df.to_excel(writer, sheet_name="一级分类", index=False)
-            bench_tpl_df.to_excel(writer, sheet_name="SPU", index=False)
-        st.download_button(
-            label="下载基准表模板",
-            data=bench_tpl_output.getvalue(),
-            file_name="基准表模板.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            key="bench_tpl_dl"
         )
 
 # 显示数据预览
@@ -288,11 +254,9 @@ if st.session_state.df_raw is not None:
                 engine = AllocationEngine()
                 engine.df_raw = st.session_state.df_raw.copy()
 
-                # 注入上传的映射表和基准表
+                # 注入上传的映射表（基准表已删除，引擎自动从原始数据计算）
                 if "mix_mapping" in st.session_state:
                     engine.mix_mapping = st.session_state.mix_mapping
-                if "benchmarks" in st.session_state:
-                    engine.benchmarks = st.session_state.benchmarks
 
                 # 注入参数
                 anchor = int(target_year) * 12 + (target_start_month + target_end_month) // 2
