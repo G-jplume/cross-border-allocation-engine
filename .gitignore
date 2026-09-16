@@ -1,0 +1,27 @@
+# Business data - do not commit
+engine_data/sheet2_raw.csv
+engine_data/sheet4_benchmarks.json
+engine_data/sheet5_results.csv
+engine_data/mix_sku_mapping.json
+
+# Excel templates
+*.xlsx
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+
+# OS
+Thumbs.db
+.DS_Store
+
+# IDE
+.vscode/
+.idea/
+
+# Debug scripts
+debug_*.py
+extract_v6_*.py
