@@ -193,9 +193,9 @@ class AllocationEngine:
 
     # Step 5: 基准占比
     def step5_benchmark(self):
-        spu_bm = {bm["label"]: bm for bm in self.benchmarks["SPU"]}
-        cat_bm = {bm["label"]: bm for bm in self.benchmarks["一级分类"]}
-        indoor_bm = {bm["label"]: bm for bm in self.benchmarks["室内外"]}
+        spu_bm = {bm["label"]: bm for bm in self.benchmarks.get("SPU", [])}
+        cat_bm = {bm["label"]: bm for bm in self.benchmarks.get("一级分类", [])}
+        indoor_bm = {bm["label"]: bm for bm in self.benchmarks.get("室内外", [])}
 
         all_target = self.df_raw[self.df_raw["在目标期_py"] == 1]
         overall_total = all_target[WAREHOUSES].sum(axis=1).sum()
@@ -213,6 +213,24 @@ class AllocationEngine:
                 "室内外": rows["室内外"].iloc[0],
             }
 
+        def compute_group_benchmark(group_col):
+            grouped = all_target.groupby(group_col)
+            bm = {}
+            for label, group in grouped:
+                wh_sums = {wh: group[wh].sum() for wh in WAREHOUSES}
+                total = sum(wh_sums.values())
+                if total == 0:
+                    continue
+                entry = {"观测数": len(group)}
+                for wh in WAREHOUSES:
+                    entry[f"基准_{wh}"] = wh_sums[wh] / total
+                bm[label] = entry
+            return bm
+
+        spu_auto = compute_group_benchmark("SPU")
+        cat_auto = compute_group_benchmark("一级分类")
+        indoor_auto = compute_group_benchmark("室内外")
+
         sku_benchmarks = {}
         for sku, info in sku_info.items():
             spu = info["SPU"]
@@ -221,16 +239,28 @@ class AllocationEngine:
             used_level = "全公司"
             bm_ratios = overall_ratios.copy()
 
-            if spu and spu in spu_bm and spu_bm[spu]["观测数"] > 0:
+            if spu and spu in spu_bm and spu_bm[spu].get("观测数", 0) > 0:
                 bm = spu_bm[spu]
                 bm_ratios = {wh: bm[f"基准_{wh}"] for wh in WAREHOUSES}
+                used_level = "SPU(预存)"
+            elif spu and spu in spu_auto and spu_auto[spu]["观测数"] > 0:
+                bm = spu_auto[spu]
+                bm_ratios = {wh: bm[f"基准_{wh}"] for wh in WAREHOUSES}
                 used_level = "SPU"
-            elif cat1 and cat1 in cat_bm and cat_bm[cat1]["观测数"] > 0:
+            elif cat1 and cat1 in cat_bm and cat_bm[cat1].get("观测数", 0) > 0:
                 bm = cat_bm[cat1]
                 bm_ratios = {wh: bm[f"基准_{wh}"] for wh in WAREHOUSES}
+                used_level = "一级分类(预存)"
+            elif cat1 and cat1 in cat_auto and cat_auto[cat1]["观测数"] > 0:
+                bm = cat_auto[cat1]
+                bm_ratios = {wh: bm[f"基准_{wh}"] for wh in WAREHOUSES}
                 used_level = "一级分类"
-            elif indoor and indoor in indoor_bm and indoor_bm[indoor]["观测数"] > 0:
+            elif indoor and indoor in indoor_bm and indoor_bm[indoor].get("观测数", 0) > 0:
                 bm = indoor_bm[indoor]
+                bm_ratios = {wh: bm[f"基准_{wh}"] for wh in WAREHOUSES}
+                used_level = "室内外(预存)"
+            elif indoor and indoor in indoor_auto and indoor_auto[indoor]["观测数"] > 0:
+                bm = indoor_auto[indoor]
                 bm_ratios = {wh: bm[f"基准_{wh}"] for wh in WAREHOUSES}
                 used_level = "室内外"
 
