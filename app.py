@@ -104,7 +104,7 @@ demand = st.sidebar.number_input("需求总量 (件)", 100, 100000, 3000, step=1
 # ============================================================
 # 主区域：文件上传
 # ============================================================
-st.subheader("1️⃣ 上传数据")
+st.subheader("1. 上传数据")
 
 col_upload, col_sample = st.columns([3, 1])
 
@@ -131,9 +131,9 @@ if uploaded_file is not None:
             df = pd.read_excel(uploaded_file, dtype={"源SKU": str, "SPU": str, "室内外": str, "一级分类": str})
 
         st.session_state.df_raw = df
-        st.success(f"✅ 上传成功！共 {len(df)} 行 × {len(df.columns)} 列")
+        st.success(f"上传成功！共 {len(df)} 行 x {len(df.columns)} 列")
     except Exception as e:
-        st.error(f"❌ 读取失败: {e}")
+        st.error(f"读取失败: {e}")
 
 elif use_sample:
     data_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "engine_data")
@@ -142,9 +142,33 @@ elif use_sample:
         df = pd.read_csv(sample_path, encoding="utf-8-sig",
             dtype={"源SKU": str, "SPU": str, "室内外": str, "一级分类": str, "运算SKU": str})
         st.session_state.df_raw = df
-        st.success(f"✅ 加载示例数据！共 {len(df)} 行 × {len(df.columns)} 列")
+        st.success(f"加载示例数据！共 {len(df)} 行 x {len(df.columns)} 列")
     else:
         st.warning("示例数据文件不存在，请上传数据。")
+
+# --- 可选：上传映射表和基准表 ---
+with st.expander("可选：上传混用SKU映射表 / 基准表", expanded=False):
+    col_m, col_b = st.columns(2)
+    with col_m:
+        mix_file = st.file_uploader("混用SKU映射表 (JSON)", type=["json"], key="mix_upload",
+            help="没有映射表也可以计算，未映射的SKU自动取'-'前部分")
+    with col_b:
+        bench_file = st.file_uploader("基准表 (JSON)", type=["json"], key="bench_upload",
+            help="没有基准表也可以计算，系统会自动从上传数据计算全公司基准")
+
+    if mix_file is not None:
+        try:
+            st.session_state.mix_mapping = json.load(mix_file)
+            st.caption(f"映射表已加载: {len(st.session_state.mix_mapping)} 条")
+        except Exception as e:
+            st.error(f"映射表读取失败: {e}")
+
+    if bench_file is not None:
+        try:
+            st.session_state.benchmarks = json.load(bench_file)
+            st.caption(f"基准表已加载")
+        except Exception as e:
+            st.error(f"基准表读取失败: {e}")
 
 # 显示数据预览
 if st.session_state.df_raw is not None:
@@ -156,14 +180,21 @@ if st.session_state.df_raw is not None:
 # ============================================================
 # 计算按钮
 # ============================================================
-st.subheader("2️⃣ 开始计算")
+st.subheader("2. 开始计算")
 
 if st.session_state.df_raw is not None:
-    if st.button("🚀 开始计算", type="primary", use_container_width=True):
+    if st.button("开始计算", type="primary", use_container_width=True):
         with st.spinner("计算中..."):
             try:
                 engine = AllocationEngine()
                 engine.df_raw = st.session_state.df_raw.copy()
+
+                # 注入上传的映射表和基准表（覆盖文件加载的）
+                if "mix_mapping" in st.session_state:
+                    mapping_list = st.session_state.mix_mapping
+                    engine.mix_mapping = {item["源SKU"]: item["相似SKU"] for item in mapping_list}
+                if "benchmarks" in st.session_state:
+                    engine.benchmarks = st.session_state.benchmarks
 
                 # 注入参数
                 anchor = int(target_year) * 12 + (target_start_month + target_end_month) // 2
@@ -178,10 +209,6 @@ if st.session_state.df_raw is not None:
 
                 # 判断目标期月份
                 def in_target_period(row):
-                    month_seq = row["年"] * 12 + row["月"]
-                    start_seq = int(target_year) * 12 + target_start_month
-                    end_seq = int(target_year) * 12 + target_end_month
-                    # 目标期是年+月范围，但也匹配历史同期
                     row_month = row["月"]
                     return 1 if target_start_month <= row_month <= target_end_month else 0
 
@@ -197,9 +224,9 @@ if st.session_state.df_raw is not None:
 
                 st.session_state.df_results = df_results
                 st.session_state.engine = engine
-                st.success(f"✅ 计算完成！共 {len(df_results)} 个SKU，需求总量 {demand} 件")
+                st.success(f"计算完成！共 {len(df_results)} 个SKU，需求总量 {demand} 件")
             except Exception as e:
-                st.error(f"❌ 计算失败: {e}")
+                st.error(f"计算失败: {e}")
                 st.exception(e)
 else:
     st.info("请先上传数据或点击「使用示例数据」")
