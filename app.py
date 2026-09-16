@@ -282,30 +282,6 @@ st.sidebar.caption(
     f"n>{int(k_cat)}时偏向子层自身，n<{int(k_cat)}时偏向父层均值"
 )
 
-# ---------- 混用SKU映射 ----------
-with st.sidebar.expander("⑥ 混用SKU映射（可选）", expanded=False):
-    st.caption("不上传也能算：未映射的 SKU 自动取 「-」前部分合并")
-    mix_file = st.file_uploader("上传映射表（源SKU / 相似SKU）",
-                                type=["csv", "xlsx", "xls"], key="mix_upload")
-    if mix_file is not None:
-        try:
-            if mix_file.name.endswith(".csv"):
-                try:
-                    mix_df = pd.read_csv(mix_file, encoding="utf-8-sig", dtype=str)
-                except UnicodeDecodeError:
-                    mix_df = pd.read_csv(mix_file, encoding="gbk", dtype=str)
-            else:
-                mix_df = pd.read_excel(mix_file, dtype=str)
-            mix_df.columns = [str(c).strip() for c in mix_df.columns]
-            if "源SKU" in mix_df.columns and "相似SKU" in mix_df.columns:
-                st.session_state.mix_mapping = dict(zip(mix_df["源SKU"], mix_df["相似SKU"]))
-                st.success(f"已加载 {len(st.session_state.mix_mapping)} 条映射")
-            else:
-                st.error("列名需为 源SKU / 相似SKU")
-        except Exception as e:
-            st.error(f"映射表读取失败: {e}")
-
-
 # ==========================================================
 # 主区域 1：上传数据
 # ==========================================================
@@ -383,6 +359,51 @@ if st.session_state.df_raw is not None:
         if _zero:
             st.caption(f"注意：{_zero} 行四仓发货量全为 0，这些行不参与加权")
         st.dataframe(_d.head(10), use_container_width=True)
+
+# ==========================================================
+# 主区域 1b：混用SKU映射（可选）
+# ==========================================================
+st.subheader("1b. 混用SKU映射（可选）")
+st.caption(
+    "上传映射表后，系统会把「源SKU」合并到对应的「相似SKU」一起计算。"
+    "不上传也能算：未映射的 SKU 自动取「-」前部分合并。"
+)
+col_mix1, col_mix2 = st.columns([3, 2])
+with col_mix1:
+    mix_file = st.file_uploader(
+        "上传混用SKU映射表 (CSV 或 Excel)",
+        type=["csv", "xlsx", "xls"], key="mix_upload_main",
+        help="需要包含两列：源SKU、相似SKU"
+    )
+with col_mix2:
+    mix_tpl = pd.DataFrame(columns=["源SKU", "相似SKU"]).to_csv(index=False).encode("utf-8-sig")
+    st.download_button("下载映射表模板", data=mix_tpl,
+                       file_name="混用SKU映射表模板.csv", mime="text/csv")
+
+if mix_file is not None:
+    try:
+        if mix_file.name.endswith(".csv"):
+            try:
+                mix_df = pd.read_csv(mix_file, encoding="utf-8-sig", dtype=str)
+            except UnicodeDecodeError:
+                mix_df = pd.read_csv(mix_file, encoding="gbk", dtype=str)
+        else:
+            mix_df = pd.read_excel(mix_file, dtype=str)
+        mix_df.columns = [str(c).strip() for c in mix_df.columns]
+        if "源SKU" in mix_df.columns and "相似SKU" in mix_df.columns:
+            st.session_state.mix_mapping = dict(zip(mix_df["源SKU"], mix_df["相似SKU"]))
+            st.success(f"已加载 {len(st.session_state.mix_mapping)} 条映射关系")
+            with st.expander("映射表预览", expanded=False):
+                st.dataframe(mix_df.head(10), use_container_width=True)
+        else:
+            st.error("列名需为 源SKU / 相似SKU，当前列名：" + "、".join(mix_df.columns))
+    except Exception as e:
+        st.error(f"映射表读取失败: {e}")
+else:
+    if "mix_mapping" in st.session_state:
+        st.info(f"已加载 {len(st.session_state.mix_mapping)} 条映射关系（之前上传的）")
+    else:
+        st.caption("未上传映射表，将使用「-」前缀自动合并")
 
 
 # ==========================================================
