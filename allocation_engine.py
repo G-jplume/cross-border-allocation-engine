@@ -27,21 +27,48 @@ class AllocationEngine:
     def __init__(self, data_dir=DATA_DIR):
         self.data_dir = data_dir
         self.params = self._load_params()
-        self.new_product_threshold = 2  # B24: 新品阈值, 历史月数<=此值时a=0, 即<3才算新品
+        self.new_product_threshold = 2
         self.mix_mapping = self._load_mix_mapping()
         self.df_raw = None
         self.sku_weighted = None
         self.sku_benchmarks = None
-        self.benchmarks = None
+        self.benchmarks = self._load_benchmarks()
+
+    # 默认参数（文件不存在时使用）
+    DEFAULT_PARAMS = {
+        "anchor": 24325, "lambda": 0.85, "k": 6.0,
+        "a_min": 0.0, "a_max": 0.9,
+        "target_type": 1, "target_start": 1, "target_end": 3,
+        "alpha_trend": 0.3, "trend_cap": 0.05,
+        "recent_start": None, "recent_end": None,
+        "far_start": None, "far_end": None,
+        "seasonal_switch": 1, "seasonal_window": 1,
+        "seasonal_beta": 3.0,
+        "seasonal_cat1": "庭院、草坪与花园",
+        "seasonal_cat2": "庭院",
+    }
 
     def _load_params(self):
-        with open(os.path.join(self.data_dir, "params.json"), "r", encoding="utf-8") as f:
-            return json.load(f)
+        path = os.path.join(self.data_dir, "params.json")
+        if os.path.exists(path):
+            with open(path, "r", encoding="utf-8") as f:
+                return json.load(f)
+        return dict(self.DEFAULT_PARAMS)
 
     def _load_mix_mapping(self):
-        with open(os.path.join(self.data_dir, "mix_sku_mapping.json"), "r", encoding="utf-8") as f:
-            mapping_list = json.load(f)
-        return {item["源SKU"]: item["相似SKU"] for item in mapping_list}
+        path = os.path.join(self.data_dir, "mix_sku_mapping.json")
+        if os.path.exists(path):
+            with open(path, "r", encoding="utf-8") as f:
+                mapping_list = json.load(f)
+            return {item["源SKU"]: item["相似SKU"] for item in mapping_list}
+        return {}
+
+    def _load_benchmarks(self):
+        path = os.path.join(self.data_dir, "sheet4_benchmarks.json")
+        if os.path.exists(path):
+            with open(path, "r", encoding="utf-8") as f:
+                return json.load(f)
+        return {"室内外": [], "一级分类": [], "SPU": []}
 
     def load_data(self):
         self.df_raw = pd.read_csv(
