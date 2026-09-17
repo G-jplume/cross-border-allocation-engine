@@ -359,41 +359,9 @@ st.sidebar.caption(
 
 # ---------- 减仓优化 ----------
 st.sidebar.subheader("⑥ 减仓优化")
-st.sidebar.caption(
-    "启用后，对每个运算SKU×仓点判断：月均单量 < 阈值 且 分仓占比 < 阈值 → 该仓点减仓。\n"
-    "被减的占比按其他仓现有比例等比分配，归一化到100%。\n"
-    "仅影响SKU层分仓占比，上层（SPU/品类/室内外/公司）仍用减仓前原始数据汇总。"
-)
+st.sidebar.caption("启用后，月均单量<3单且分仓占比<5%的仓点会被减仓，占比按比例均分到其他仓点。")
 
 reduction_on = st.sidebar.checkbox("启用减仓优化", value=False)
-
-if reduction_on:
-    col_r1, col_r2 = st.sidebar.columns(2)
-    with col_r1:
-        monthly_threshold = st.number_input(
-            "月均单量阈值", 0.1, 100.0, 3.0, 0.1,
-            help=(
-                "该运算SKU在该仓的月均出单量低于此值时触发减仓判断。\n"
-                "月均 = 该仓总单量 ÷ 上架月数（首次出单月到数据最新月份）\n"
-                "默认3：月均不到3单的仓点备货效率过低"
-            )
-        )
-    with col_r2:
-        ratio_threshold = st.slider(
-            "分仓占比阈值", 0.01, 0.30, 0.05, 0.01,
-            help=(
-                "该仓占该运算SKU总单量的比例低于此值时触发减仓判断。\n"
-                "默认5%：占比不到5%的仓不是该SKU的主要出货仓"
-            )
-        )
-    st.sidebar.caption(
-        f"双条件同时满足才减仓：月均<{monthly_threshold}单 且 占比<{ratio_threshold:.0%}\n"
-        "上架月数 = 首次出单月到数据最新月份（自动检测，非固定8月）\n"
-        "重分配方式：被减占比按其他仓现有比例等比分配 → 归一化到100%"
-    )
-else:
-    monthly_threshold = 3.0
-    ratio_threshold = 0.05
 
 # ==========================================================
 # 主区域 1：上传数据
@@ -550,7 +518,7 @@ else:
                 # 减仓优化：仅影响SKU层
                 if reduction_on:
                     df_results, reduction_summary = apply_warehouse_reduction(
-                        engine, df_results, monthly_threshold, ratio_threshold
+                        engine, df_results, 3.0, 0.05
                     )
                     st.session_state.reduction_summary = reduction_summary
                 else:
@@ -591,17 +559,8 @@ if st.session_state.df_results is not None:
     # --- 减仓摘要 ---
     reduction_summary = st.session_state.get("reduction_summary")
     if reduction_on and reduction_summary and reduction_summary["n_reduced_skus"] > 0:
-        with st.expander(f"📦 减仓优化摘要（{reduction_summary['n_reduced_skus']}个SKU, {reduction_summary['n_reduced_slots']}个仓位）", expanded=True):
-            flags = reduction_summary["reduction_flags"]
-            wh_count = {}
-            for whs in flags.values():
-                for wh in whs:
-                    wh_count[wh] = wh_count.get(wh, 0) + 1
-            rc1, rc2, rc3 = st.columns(3)
-            rc1.metric("减仓SKU数", reduction_summary["n_reduced_skus"])
-            rc2.metric("减仓仓位数", reduction_summary["n_reduced_slots"])
-            rc3.metric("各仓减仓数", " / ".join(f"{wh}:{wh_count.get(wh,0)}" for wh in WAREHOUSES))
-            st.caption("仅影响SKU层分仓占比。上层（SPU/一级分类/室内外/公司）使用减仓前原始数据汇总。")
+        with st.expander(f"📦 减仓优化（{reduction_summary['n_reduced_skus']}个SKU, {reduction_summary['n_reduced_slots']}个仓位）", expanded=False):
+            st.caption("仅影响SKU层分仓占比，上层聚合使用减仓前原始数据。")
 
     col1, col2, col3, col4 = st.columns(4)
     col1.metric("运算SKU 总数", f"{len(df_r):,}")
@@ -912,17 +871,7 @@ with st.expander("❓ 常见问题（FAQ）", expanded=False):
 
 ---
 
-**Q6：「减仓优化」是什么？怎么用？**
+**Q6：「减仓优化」是什么？**
 
-侧边栏「⑥ 减仓优化」开关，默认关闭。启用后对每个运算SKU×仓点判断：
-
-- **月均单量 < 阈值**（默认3单）：该运算SKU在该仓的月均出单量 = 总单量 ÷ 上架月数（首次出单到数据最新月份，自动检测）
-- **分仓占比 < 阈值**（默认5%）：该仓单量占该运算SKU全仓总单量的比例
-
-**双条件同时满足**才减仓。被减仓的占比按其他仓现有比例等比分配，归一化到100%。
-
-**影响范围**：
-- ✅ 影响：SKU层分仓占比（调整后列）会被修改，导出时有「是否减仓」列备注
-- ❌ 不影响：上层聚合（SPU/一级分类/室内外/全公司）仍用减仓前原始数据汇总
-
-**为什么不看单量或占比单独判断？** 只看单量会误删大SKU的小仓（可能有几十单但占比不到5%），只看占比会误删小SKU的主仓（可能占比30%但月均不到1单）。双条件同时满足才触发，只砍真正的"僵尸仓位"。""")
+侧边栏「⑥ 减仓优化」开关，默认关闭。启用后，月均单量<3单且分仓占比<5%的仓点会被减仓，其占比按其他仓现有比例等比分配并归一化到100%。仅影响SKU层分仓占比，上层聚合使用减仓前原始数据。导出时SKU表增加「是否减仓」列备注。
+""")
