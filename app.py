@@ -357,12 +357,6 @@ st.sidebar.caption(
     f"n>{int(k_cat)}时偏向子层自身，n<{int(k_cat)}时偏向父层均值"
 )
 
-# ---------- 减仓优化 ----------
-st.sidebar.subheader("⑥ 减仓优化")
-st.sidebar.caption("启用后，月均单量<3单且分仓占比<5%的仓点会被减仓，占比按比例均分到其他仓点。")
-
-reduction_on = st.sidebar.checkbox("启用减仓优化", value=False)
-
 # ==========================================================
 # 主区域 1：上传数据
 # ==========================================================
@@ -472,6 +466,7 @@ st.subheader("2. 开始计算")
 if st.session_state.df_raw is None:
     st.info("请先上传数据，或点击「使用示例数据」")
 else:
+    reduction_on = st.checkbox("启用减仓优化（月均<3单且占比<5%的仓点按比例均分到其他仓）", value=False)
     if st.button("开始计算", type="primary", use_container_width=True):
         with st.spinner("计算中..."):
             try:
