@@ -29,7 +29,8 @@ st.set_page_config(
 # session_state 初始化
 # ==========================================================
 for k, v in [("df_raw", None), ("df_results", None), ("engine", None),
-             ("agg_results", {}), ("checks", []), ("edited_ratios", None)]:
+             ("agg_results", {}), ("checks", []), ("edited_ratios", None),
+             ("reduction_summary", None)]:
     if k not in st.session_state:
         st.session_state[k] = v
 
@@ -41,6 +42,80 @@ st.markdown(
     "上传历史出单数据 → 调节参数 → 计算各仓库发货占比 → 导出结果\n\n"
     "✅ 四仓占比合计恒为 100% | ✅ 最大余额法保证落货量整数精确 | ✅ 自动体检防静默失效"
 )
+
+
+def apply_warehouse_reduction(engine, df_results, monthly_threshold, ratio_threshold):
+    """减仓优化：对运算SKU×仓点判断是否减仓，被减的占比等比分配给其他仓，归一化到100%。
+    仅修改SKU层的「调整后_」列，上层聚合不受影响。
+    返回 (df_results_modified, reduction_summary_dict)
+    """
+    df_raw = engine.df_raw
+    latest_month_seq = int(df_raw["月份序号_py"].max())
+
+    sku_stats = {}
+    for sku, group in df_raw.groupby("运算SKU_py"):
+        wh_totals = {wh: int(group[wh].sum()) for wh in WAREHOUSES}
+        grand_total = sum(wh_totals.values())
+        if grand_total == 0:
+            continue
+        has_orders = group[WAREHOUSES].sum(axis=1) > 0
+        if not has_orders.any():
+            continue
+        first_month_seq = int(group.loc[has_orders, "月份序号_py"].min())
+        age_months = latest_month_seq - first_month_seq + 1
+        for wh in WAREHOUSES:
+            wh_total = wh_totals[wh]
+            if wh_total == 0:
+                continue
+            monthly_avg = wh_total / age_months
+            ratio = wh_total / grand_total
+            if monthly_avg < monthly_threshold and ratio < ratio_threshold:
+                if sku not in sku_stats:
+                    sku_stats[sku] = {"reduced": set(), "age": age_months}
+                sku_stats[sku]["reduced"].add(wh)
+
+    df = df_results.copy()
+    reduction_flags = {}
+
+    for sku, stats in sku_stats.items():
+        reduced_whs = stats["reduced"]
+        if len(reduced_whs) >= len(WAREHOUSES):
+            continue
+        mask = df["SKU"].astype(str) == str(sku)
+        if not mask.any():
+            continue
+        adj_cols = {wh: f"调整后_{wh}" for wh in WAREHOUSES}
+        current = {wh: float(df.loc[mask, adj_cols[wh]].iloc[0]) for wh in WAREHOUSES}
+        reduced_share = sum(current[wh] for wh in reduced_whs)
+        for wh in reduced_whs:
+            df.loc[mask, adj_cols[wh]] = 0.0
+        remaining_whs = [wh for wh in WAREHOUSES if wh not in reduced_whs]
+        remaining_total = sum(current[wh] for wh in remaining_whs)
+        if remaining_total > 0:
+            for wh in remaining_whs:
+                new_val = current[wh] + reduced_share * (current[wh] / remaining_total)
+                df.loc[mask, adj_cols[wh]] = new_val
+        else:
+            for wh in remaining_whs:
+                df.loc[mask, adj_cols[wh]] = reduced_share / len(remaining_whs)
+        adj_total = sum(float(df.loc[mask, adj_cols[wh]].iloc[0]) for wh in WAREHOUSES)
+        if adj_total > 0:
+            for wh in WAREHOUSES:
+                df.loc[mask, adj_cols[wh]] = float(df.loc[mask, adj_cols[wh]].iloc[0]) / adj_total
+        if "调整后合计" in df.columns:
+            df.loc[mask, "调整后合计"] = 1.0
+        reduction_flags[sku] = list(reduced_whs)
+
+    df["是否减仓"] = ""
+    for sku, whs in reduction_flags.items():
+        mask = df["SKU"].astype(str) == str(sku)
+        df.loc[mask, "是否减仓"] = f"是-{','.join(whs)}"
+
+    n_skus = len(reduction_flags)
+    n_slots = sum(len(whs) for whs in reduction_flags.values())
+    summary = {"n_reduced_skus": n_skus, "n_reduced_slots": n_slots,
+               "reduction_flags": reduction_flags}
+    return df, summary
 
 
 def compute_aggregate_ratios(df_sku):
@@ -282,6 +357,44 @@ st.sidebar.caption(
     f"n>{int(k_cat)}时偏向子层自身，n<{int(k_cat)}时偏向父层均值"
 )
 
+# ---------- 减仓优化 ----------
+st.sidebar.subheader("⑥ 减仓优化")
+st.sidebar.caption(
+    "启用后，对每个运算SKU×仓点判断：月均单量 < 阈值 且 分仓占比 < 阈值 → 该仓点减仓。\n"
+    "被减的占比按其他仓现有比例等比分配，归一化到100%。\n"
+    "仅影响SKU层分仓占比，上层（SPU/品类/室内外/公司）仍用减仓前原始数据汇总。"
+)
+
+reduction_on = st.sidebar.checkbox("启用减仓优化", value=False)
+
+if reduction_on:
+    col_r1, col_r2 = st.sidebar.columns(2)
+    with col_r1:
+        monthly_threshold = st.number_input(
+            "月均单量阈值", 0.1, 100.0, 3.0, 0.1,
+            help=(
+                "该运算SKU在该仓的月均出单量低于此值时触发减仓判断。\n"
+                "月均 = 该仓总单量 ÷ 上架月数（首次出单月到数据最新月份）\n"
+                "默认3：月均不到3单的仓点备货效率过低"
+            )
+        )
+    with col_r2:
+        ratio_threshold = st.slider(
+            "分仓占比阈值", 0.01, 0.30, 0.05, 0.01,
+            help=(
+                "该仓占该运算SKU总单量的比例低于此值时触发减仓判断。\n"
+                "默认5%：占比不到5%的仓不是该SKU的主要出货仓"
+            )
+        )
+    st.sidebar.caption(
+        f"双条件同时满足才减仓：月均<{monthly_threshold}单 且 占比<{ratio_threshold:.0%}\n"
+        "上架月数 = 首次出单月到数据最新月份（自动检测，非固定8月）\n"
+        "重分配方式：被减占比按其他仓现有比例等比分配 → 归一化到100%"
+    )
+else:
+    monthly_threshold = 3.0
+    ratio_threshold = 0.05
+
 # ==========================================================
 # 主区域 1：上传数据
 # ==========================================================
@@ -431,12 +544,27 @@ else:
                 drop_cols = [c for c in df_results.columns if c.startswith("落货量")]
                 df_results = df_results.drop(columns=drop_cols)
 
-                st.session_state.df_results = df_results
+                # 上层聚合用减仓前原始数据
                 st.session_state.agg_results = compute_aggregate_ratios(df_results)
+
+                # 减仓优化：仅影响SKU层
+                if reduction_on:
+                    df_results, reduction_summary = apply_warehouse_reduction(
+                        engine, df_results, monthly_threshold, ratio_threshold
+                    )
+                    st.session_state.reduction_summary = reduction_summary
+                else:
+                    df_results["是否减仓"] = ""
+                    st.session_state.reduction_summary = None
+
+                st.session_state.df_results = df_results
                 st.session_state.engine = engine
                 st.session_state.checks = engine.self_check(df_results)
                 st.session_state.edited_ratios = None
-                st.success(f"计算完成！共 {len(df_results)} 个运算SKU")
+                n_msg = f"计算完成！共 {len(df_results)} 个运算SKU"
+                if reduction_on and reduction_summary["n_reduced_skus"] > 0:
+                    n_msg += f"（减仓: {reduction_summary['n_reduced_skus']}个SKU, {reduction_summary['n_reduced_slots']}个仓位）"
+                st.success(n_msg)
             except Exception as e:
                 st.error(f"计算失败: {e}")
                 st.exception(e)
@@ -459,6 +587,21 @@ if st.session_state.df_results is not None:
         with st.expander("🔍 自动体检", expanded=bool(bad)):
             for name, ok, msg in checks:
                 (st.success if ok else st.warning)(f"{'✓' if ok else '⚠'} **{name}** — {msg}")
+
+    # --- 减仓摘要 ---
+    reduction_summary = st.session_state.get("reduction_summary")
+    if reduction_on and reduction_summary and reduction_summary["n_reduced_skus"] > 0:
+        with st.expander(f"📦 减仓优化摘要（{reduction_summary['n_reduced_skus']}个SKU, {reduction_summary['n_reduced_slots']}个仓位）", expanded=True):
+            flags = reduction_summary["reduction_flags"]
+            wh_count = {}
+            for whs in flags.values():
+                for wh in whs:
+                    wh_count[wh] = wh_count.get(wh, 0) + 1
+            rc1, rc2, rc3 = st.columns(3)
+            rc1.metric("减仓SKU数", reduction_summary["n_reduced_skus"])
+            rc2.metric("减仓仓位数", reduction_summary["n_reduced_slots"])
+            rc3.metric("各仓减仓数", " / ".join(f"{wh}:{wh_count.get(wh,0)}" for wh in WAREHOUSES))
+            st.caption("仅影响SKU层分仓占比。上层（SPU/一级分类/室内外/公司）使用减仓前原始数据汇总。")
 
     col1, col2, col3, col4 = st.columns(4)
     col1.metric("运算SKU 总数", f"{len(df_r):,}")
@@ -485,7 +628,8 @@ if st.session_state.df_results is not None:
                     "基准_美西", "基准_美东", "基准_美南GA", "基准_美南TX",
                     "最终_美西", "最终_美东", "最终_美南GA", "最终_美南TX",
                     "趋势差_美西", "趋势差_美东", "趋势差_美南GA", "趋势差_美南TX",
-                    "调整后_美西", "调整后_美东", "调整后_美南GA", "调整后_美南TX"]
+                    "调整后_美西", "调整后_美东", "调整后_美南GA", "调整后_美南TX",
+                    "是否减仓"]
     display_cols = [c for c in display_cols if c in df_show.columns]
     pct_cols = [c for c in display_cols if c.split("_")[0] in
                 ("自身", "基准", "最终", "调整后", "趋势差")]
@@ -765,4 +909,20 @@ with st.expander("❓ 常见问题（FAQ）", expanded=False):
 4. **自检**：计算后自动验证「最终占比」和「调整后占比」的合计偏差 < 1e-9
 
 落货量分配使用**最大余额法**，保证整数合计精确等于发运批量。
-""")
+
+---
+
+**Q6：「减仓优化」是什么？怎么用？**
+
+侧边栏「⑥ 减仓优化」开关，默认关闭。启用后对每个运算SKU×仓点判断：
+
+- **月均单量 < 阈值**（默认3单）：该运算SKU在该仓的月均出单量 = 总单量 ÷ 上架月数（首次出单到数据最新月份，自动检测）
+- **分仓占比 < 阈值**（默认5%）：该仓单量占该运算SKU全仓总单量的比例
+
+**双条件同时满足**才减仓。被减仓的占比按其他仓现有比例等比分配，归一化到100%。
+
+**影响范围**：
+- ✅ 影响：SKU层分仓占比（调整后列）会被修改，导出时有「是否减仓」列备注
+- ❌ 不影响：上层聚合（SPU/一级分类/室内外/全公司）仍用减仓前原始数据汇总
+
+**为什么不看单量或占比单独判断？** 只看单量会误删大SKU的小仓（可能有几十单但占比不到5%），只看占比会误删小SKU的主仓（可能占比30%但月均不到1单）。双条件同时满足才触发，只砍真正的"僵尸仓位"。""")
