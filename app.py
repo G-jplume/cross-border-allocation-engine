@@ -228,32 +228,14 @@ else:
     beta, seasonal_window = 1.0, 1
 
 # 季节适用品类 —— 从上传数据动态识别，默认勾选庭院类
-st.sidebar.markdown("**季节适用品类**")
-st.sidebar.caption(
-    "选项从上传数据的「一级分类」列自动生成。\n"
-    "默认勾选「庭院、草坪与花园」和「庭院」——经跨年同月检验季节性显著。\n"
-    "可手动增删：不选任何品类 = 季节因子不生效。"
-)
-
-if st.session_state.df_raw is not None and "一级分类" in st.session_state.df_raw.columns:
+if seasonal_on and st.session_state.df_raw is not None and "一级分类" in st.session_state.df_raw.columns:
     _cats_all = sorted(
         st.session_state.df_raw["一级分类"].dropna().astype(str).unique().tolist()
     )
     _cats_all = [c for c in _cats_all if c.strip()]
     _default_cats = [c for c in _cats_all if c.strip() in ("庭院、草坪与花园", "庭院")]
-    seasonal_cats = st.sidebar.multiselect(
-        "选择要启用季节因子的品类（可多选）",
-        options=_cats_all,
-        default=_default_cats,
-        key="seasonal_cats_ms",
-    )
-    n_rows_cat = int(st.session_state.df_raw["一级分类"].isin(seasonal_cats).sum())
-    if seasonal_cats:
-        st.sidebar.caption(f"✅ 已选 {len(seasonal_cats)} 个品类，覆盖 {n_rows_cat} 行数据")
-    else:
-        st.sidebar.warning("⚠️ 未选择任何品类，季节因子不会生效（相当于关闭）")
+    seasonal_cats = _default_cats
 else:
-    st.sidebar.caption("📥 上传数据后，这里会列出你的「一级分类」供勾选")
     seasonal_cats = []
 
 eff("季节匹配因子", "作用于加权层（步骤③），与衰减因子相乘，放大同季历史数据权重。")
@@ -459,6 +441,18 @@ st.subheader("2. 开始计算")
 if st.session_state.df_raw is None:
     st.info("请先上传数据，或点击「使用示例数据」")
 else:
+    if seasonal_on and "一级分类" in st.session_state.df_raw.columns:
+        _cats_all = sorted(
+            st.session_state.df_raw["一级分类"].dropna().astype(str).unique().tolist()
+        )
+        _cats_all = [c for c in _cats_all if c.strip()]
+        _default_cats = [c for c in _cats_all if c.strip() in ("庭院、草坪与花园", "庭院")]
+        seasonal_cats = st.multiselect(
+            "季节适用品类（启用季节因子后显示）",
+            options=_cats_all,
+            default=_default_cats,
+            key="seasonal_cats_main",
+        )
     reduction_on = st.checkbox("启用减仓优化（月均<3单且占比<5%的仓点按比例均分到其他仓）", value=False)
     if st.button("开始计算", type="primary", use_container_width=True):
         with st.spinner("计算中..."):
