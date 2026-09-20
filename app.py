@@ -887,16 +887,3 @@ if st.session_state.df_results is not None:
                                data=agg_results["一级分类"].to_csv(index=False).encode("utf-8-sig"),
                                file_name="分仓占比结果_一级分类.csv", mime="text/csv",
                                use_container_width=True)
-
-
-# ==========================================================
-# 页脚：计算链路说明 + 常见问题
-# ==========================================================
-st.markdown("---")
-with st.expander("📖 计算链路说明（7步）", expanded=False):
-    _guide_lines = GUIDE_MD.split("## 常见问题")[0]
-    st.markdown(_guide_lines)
-
-with st.expander("❓ 常见问题（FAQ）", expanded=False):
-    _faq_part = "## 常见问题" + GUIDE_MD.split("## 常见问题")[1]
-    st.markdown(_faq_part)
