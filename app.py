@@ -165,18 +165,17 @@ def eff(label, desc, required=True):
 st.sidebar.subheader("① 目标发货月份")
 st.sidebar.caption("设定目标发货的起止年月，支持跨年（如2026年12月→2027年3月）。")
 
-col_y1, col_m1 = st.sidebar.columns(2)
-with col_y1:
-    target_start_year = st.number_input("起始年", 2024, 2030, 2027, key="tsy")
-with col_m1:
-    target_start_month = st.number_input("起始月", 1, 12, 1,
-                                         help="单月发货就填相同年月", key="tsm")
-col_m2, col_y2 = st.sidebar.columns(2)
-with col_m2:
-    target_end_month = st.number_input("结束月", 1, 12, 3,
-                                       help="跨年时结束月可小于起始月", key="tem")
-with col_y2:
-    target_end_year = st.number_input("结束年", 2024, 2030, 2027, key="tey")
+_ym_options = {f"{y}年{m}月": (y, m) for y in range(2024, 2031) for m in range(1, 13)}
+_ym_labels = list(_ym_options.keys())
+col_ys, col_ye = st.sidebar.columns(2)
+with col_ys:
+    _start_label = st.selectbox("起始年月", _ym_labels,
+                                index=_ym_labels.index("2027年1月"), key="tsym")
+with col_ye:
+    _end_label = st.selectbox("结束年月", _ym_labels,
+                              index=_ym_labels.index("2027年3月"), key="teym")
+target_start_year, target_start_month = _ym_options[_start_label]
+target_end_year, target_end_month = _ym_options[_end_label]
 
 # 计算月份序号区间
 target_start_seq = int(target_start_year) * 12 + int(target_start_month)
