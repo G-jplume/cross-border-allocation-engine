@@ -163,34 +163,68 @@ def eff(label, desc, required=True):
 
 # ---------- 目标发货月份 ----------
 st.sidebar.subheader("① 目标发货月份")
-st.sidebar.caption("发哪个月的货。系统只统计这段月份的历史数据，并以此推导季节窗口和趋势窗口。")
+st.sidebar.caption("设定目标发货的起止年月，支持跨年（如2026年12月→2027年3月）。")
 
-col_m1, col_m2 = st.sidebar.columns(2)
+col_y1, col_m1 = st.sidebar.columns(2)
+with col_y1:
+    target_start_year = st.number_input("起始年", 2024, 2030, 2027, key="tsy")
 with col_m1:
     target_start_month = st.number_input("起始月", 1, 12, 1,
-                                         help="单月发货就填相同数字，如 5、5")
+                                         help="单月发货就填相同年月", key="tsm")
+col_m2, col_y2 = st.sidebar.columns(2)
 with col_m2:
     target_end_month = st.number_input("结束月", 1, 12, 3,
-                                       help="发 4-6 月三批货就填 4 和 6")
-target_year = st.sidebar.number_input("目标年份", 2024, 2030, 2027)
+                                       help="跨年时结束月可小于起始月", key="tem")
+with col_y2:
+    target_end_year = st.number_input("结束年", 2024, 2030, 2027, key="tey")
 
-if target_start_month > target_end_month:
-    st.sidebar.warning("起始月大于结束月，已自动交换。")
+# 计算月份序号区间
+target_start_seq = int(target_start_year) * 12 + int(target_start_month)
+target_end_seq = int(target_end_year) * 12 + int(target_end_month)
+
+if target_start_seq > target_end_seq:
+    st.sidebar.warning("起始年月晚于结束年月，已自动交换。")
+    target_start_seq, target_end_seq = target_end_seq, target_start_seq
+    target_start_year, target_end_year = target_end_year, target_start_year
     target_start_month, target_end_month = target_end_month, target_start_month
 
+# 锚点 = 目标期中间月份序号（支持跨年）
+anchor = (target_start_seq + target_end_seq) // 2
+anchor_year = anchor // 12
+anchor_month = (anchor - 1) % 12 + 1
+
+# 目标期月份列表（1-12，去重）
+target_months_set = set()
+s = target_start_seq
+while s <= target_end_seq:
+    target_months_set.add((s - 1) % 12 + 1)
+    s += 1
+
 eff("目标发货月份",
-    f"锚点 = {target_year}年{target_start_month}-{target_end_month}月。"
-    "衰减权重只作用于目标期月份，其余月份权重归零。")
+    f"锚点 = {anchor_year}年{anchor_month}月。"
+    f"目标期：{target_start_year}年{target_start_month}月 → {target_end_year}年{target_end_month}月"
+    f"（含{len(target_months_set)}个月份编号：{sorted(target_months_set)}）。"
+    "强季节品类只看目标期同月，弱季节品类放开全部月份。")
 
 # ---------- 时间衰减 ----------
 st.sidebar.subheader("② 时间衰减加权")
-st.sidebar.caption("控制目标期内历史数据的影响力：越接近锚点的月份权重越高。")
+st.sidebar.caption(
+    "强季节品类只看目标期同月数据，弱季节品类放开全部月份。\n"
+    "同月跨年用 λ_same（更高），非同月用 λ（更低）。"
+)
 
 lambda_val = st.sidebar.slider(
-    "衰减速度 λ", 0.50, 1.00, 0.85, 0.01,
-    help="每月权重乘以 λ。0.85=每月衰减15%；1.0=完全不衰减。"
+    "非同月衰减速度 λ", 0.50, 1.00, 0.85, 0.01,
+    help="弱季节品类的非同月数据按此衰减。0.85=每月衰减15%。"
 )
-st.sidebar.caption("λ=0.85：1个月前权重85%，6个月前38%，12个月前14%")
+lambda_same = st.sidebar.slider(
+    "同月跨年衰减速度 λ_same", 0.80, 1.00, 0.95, 0.01,
+    help="同月数据跨年衰减。0.95=去年同月保留95%，前年同月保留90%。"
+)
+st.sidebar.caption(
+    f"同月：去年{lambda_same:.0%}，前年{lambda_same**2:.0%} | "
+    f"非同月：1个月前{lambda_val:.0%}，6个月前{lambda_val**6:.0%}"
+)
 
 # ---------- 季节匹配 ----------
 st.sidebar.subheader("③ 季节匹配因子")
@@ -203,17 +237,15 @@ seasonal_on = st.sidebar.checkbox("启用季节因子", value=True)
 
 if seasonal_on:
     beta = st.sidebar.slider(
-        "季节增强倍数 β", 1.0, 5.0, 3.0, 0.1,
-        help=(
-            "落在季节窗口内的历史数据，其权重乘以此倍数。\n"
-            "β=3.0（默认）：权重放大3倍。例如原始衰减权重0.5 → 放大后1.5\n"
-            "β=1.0：不增强（等同关闭季节因子）\n"
-            "β=5.0：放大5倍（极端季节品类适用）"
-        )
+        "强季节增强倍数 β", 1.0, 5.0, 3.0, 0.1,
+        help="强季节品类（如庭院）同月数据权重放大倍数。"
+    )
+    beta_weak = st.sidebar.slider(
+        "弱季节增强倍数 β_weak", 1.0, 3.0, 1.5, 0.1,
+        help="弱季节品类同月数据权重放大倍数。1.0=不放大。"
     )
     st.sidebar.caption(
-        f"β={beta:.1f}：同季节数据权重 × {beta:.1f}，"
-        f"非季节性数据权重不变（×1.0）"
+        f"强季节 β={beta:.1f}，弱季节 β={beta_weak:.1f}，非同月 ×1.0"
     )
     seasonal_window = st.sidebar.slider(
         "季节窗口范围 N", 1, 3, 1,
@@ -225,7 +257,7 @@ if seasonal_on:
         )
     )
 else:
-    beta, seasonal_window = 1.0, 1
+    beta, beta_weak, seasonal_window = 1.0, 1.0, 1
 
 # 季节适用品类 —— 从上传数据动态识别，默认勾选庭院类
 if seasonal_on and st.session_state.df_raw is not None and "一级分类" in st.session_state.df_raw.columns:
@@ -266,18 +298,7 @@ else:
         f"🟢 趋势窗口 = 去年同期 vs 前年同期，单仓最多调整 ±{trend_cap:.0%}"
     )
 
-norm_mode = st.sidebar.radio(
-    "四仓占比合计处理方式",
-    ["归一化（四仓合计=100%）⭐", "保留原值（同Excel模板）"],
-    index=0,
-    help=(
-        "归一化（推荐）：趋势调整后把四仓占比缩放到合计 100%\n"
-        "保留原值：与 Excel 模板 AS 列一致，合计可能在 97%~103% 之间"
-    ),
-)
-norm_method = "proportional" if norm_mode.startswith("归一化") else "raw"
-if norm_method == "proportional":
-    st.sidebar.caption("✅ 已启用归一化：四仓占比合计恒为 100%")
+norm_method = "proportional"
 
 # ---------- 新品与基准 ----------
 st.sidebar.subheader("⑤ 新品与基准")
@@ -287,8 +308,12 @@ new_product_threshold = st.sidebar.slider(
     "新品阈值（月）", 1, 12, 2,
     help="历史出单月数 ≤ 此值的 SKU 视为新品，完全使用基准占比"
 )
+new_product_min_orders = st.sidebar.slider(
+    "新品订单量门槛", 1, 100, 10,
+    help="目标期总单量 < 此值也视为新品，避免低单量SKU分仓偶然性"
+)
 st.sidebar.caption(
-    f"历史出单月数≤{new_product_threshold} → 视为新品，自身权重=0，完全用基准"
+    f"新品判定：历史月数≤{new_product_threshold} 或 目标期单量<{new_product_min_orders}"
 )
 
 k_val = st.sidebar.slider(
@@ -463,10 +488,10 @@ else:
                 if "mix_mapping" in st.session_state:
                     engine.mix_mapping = st.session_state.mix_mapping
 
-                # 锚点 = 目标期中间月份的月份序号
-                anchor = int(target_year) * 12 + (target_start_month + target_end_month) // 2
+                # 锚点 = 目标期中间月份序号（已支持跨年）
                 engine.params["anchor"] = anchor
                 engine.params["lambda"] = lambda_val
+                engine.params["lambda_same_month"] = lambda_same
                 engine.params["k"] = k_val
                 engine.params["a_min"] = a_min
                 engine.params["a_max"] = a_max
@@ -475,13 +500,17 @@ else:
                 engine.params["norm_method"] = norm_method
                 engine.params["seasonal_switch"] = 1 if (seasonal_on and seasonal_cats) else 0
                 engine.params["seasonal_beta"] = beta
+                engine.params["seasonal_beta_weak"] = beta_weak
                 engine.params["seasonal_window"] = seasonal_window
+                engine.params["new_product_min_orders"] = new_product_min_orders
                 engine.new_product_threshold = new_product_threshold
                 engine.k_cat = float(k_cat)
                 engine.seasonal_categories = seasonal_cats
 
-                engine.df_raw["在目标期"] = engine.df_raw["月"].apply(
-                    lambda m: 1 if target_start_month <= int(m) <= target_end_month else 0
+                # 跨年目标期：用月份序号区间判定"在目标期"
+                engine.df_raw["在目标期"] = engine.df_raw.apply(
+                    lambda row: 1 if target_start_seq <= int(row["年"]) * 12 + int(row["月"]) <= target_end_seq else 0,
+                    axis=1
                 )
 
                 engine.step1_sku_mapping()
