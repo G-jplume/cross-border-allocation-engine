@@ -64,7 +64,10 @@ class AllocationEngine:
         "far_start": None, "far_end": None,
         "seasonal_switch": 1, "seasonal_window": 1,
         "seasonal_beta": 3.0,
+        "seasonal_beta_weak": 1.5,
         "seasonal_categories": "庭院、草坪与花园,庭院",
+        "lambda_same_month": 0.95,
+        "new_product_min_orders": 10,
         "k_cat": 12.0,
         "norm_method": "proportional",
     }
@@ -145,16 +148,31 @@ class AllocationEngine:
         if rs and re_ and fs and fe:
             return int(rs), int(re_), int(fs), int(fe)
 
-        # 自动推导：以目标期月份集合构造区间
-        months = self._get_target_months()
-        if not months:
-            return None
-        anchor = int(self.params["anchor"])
-        width = len(months)
-        # 目标期起始月序号 = anchor - width + 1（假设连续月份）
-        target_start_seq = anchor - width + 1
-        recent_lo, recent_hi = target_start_seq - 12, anchor - 12
-        far_lo, far_hi = target_start_seq - 24, anchor - 24
+        # 自动推导：用"在目标期"列的月份序号区间（支持跨年）
+        if self.df_raw is not None and "在目标期" in self.df_raw.columns:
+            in_tp = self.df_raw[self.df_raw["在目标期"] == 1]
+            if "月份序号_py" in in_tp.columns and len(in_tp) > 0:
+                target_lo = int(in_tp["月份序号_py"].min())
+                target_hi = int(in_tp["月份序号_py"].max())
+            else:
+                months = self._get_target_months()
+                if not months:
+                    return None
+                anchor = int(self.params["anchor"])
+                width = len(months)
+                target_lo = anchor - width + 1
+                target_hi = anchor
+        else:
+            months = self._get_target_months()
+            if not months:
+                return None
+            anchor = int(self.params["anchor"])
+            width = len(months)
+            target_lo = anchor - width + 1
+            target_hi = anchor
+
+        recent_lo, recent_hi = target_lo - 12, target_hi - 12
+        far_lo, far_hi = target_lo - 24, target_hi - 24
         return recent_lo, recent_hi, far_lo, far_hi
 
     # =========================================================
@@ -181,50 +199,65 @@ class AllocationEngine:
 
     # =========================================================
     # Step 2: 时间衰减加权
+    # 优化：建议1 - 按品类分组，强季节品类限制目标期，弱季节品类放开全部月份
+    # 优化：建议2 - 同月跨年用 λ_same_month (0.95)，非同月用 λ (0.85)
     # =========================================================
     def step2_decay_weight(self):
         df = self.df_raw.copy()
         anchor = self.params["anchor"]
         lambda_val = self.params["lambda"]
+        lambda_same = float(self.params.get("lambda_same_month", 0.95))
+        cats = self._get_seasonal_categories()
 
         df["月份序号_py"] = df["年"] * 12 + df["月"]
-        # 衰减权重只作用于【目标期】内的月份：目标期以外（含未来月份）权重一律为 0。
-        # 目标期内的月份再按 λ^(anchor - month) 做时间衰减。
-        # 注意：不能用 λ^|anchor-month|，那会把目标期外的数据也算进自身占比。
         dist = anchor - df["月份序号_py"]
         in_target = df["在目标期"] == 1 if "在目标期" in df.columns else pd.Series(True, index=df.index)
-        df["衰减权重_py"] = np.where(
-            in_target, lambda_val ** dist.clip(lower=0), 0.0
+
+        # 判断是否为同月（月份编号在目标期月份列表中）
+        target_months = self._get_target_months()
+        is_same_month = df["月"].apply(lambda m: int(m) in target_months)
+
+        # 判断是否为强季节品类
+        is_seasonal_cat = df["一级分类"].isin(cats) if "一级分类" in df.columns else pd.Series(False, index=df.index)
+
+        # 建议1+2组合：
+        # 强季节品类 + 同月 → in_target & lambda_same (0.95) 衰减
+        # 强季节品类 + 非同月 → 权重0 (保持目标期限制)
+        # 弱季节品类 + 同月 → lambda_same (0.95) 衰减
+        # 弱季节品类 + 非同月 → lambda (0.85) 衰减
+        # 强季节品类的非同月数据权重为0
+        decay_weight = np.where(
+            is_seasonal_cat,
+            np.where(in_target, lambda_same ** dist.clip(lower=0), 0.0),
+            np.where(is_same_month, lambda_same ** dist.clip(lower=0),
+                     lambda_val ** dist.clip(lower=0))
         )
+        df["衰减权重_py"] = decay_weight
 
         if "在目标期" in df.columns:
             df["在目标期_py"] = df["在目标期"]
 
-        if "衰减权重_N" in df.columns:
-            df["decay_diff"] = abs(df["衰减权重_py"] - df["衰减权重_N"])
-            max_diff = df["decay_diff"].max()
-            print(f"  Step2: max decay weight diff vs Excel: {max_diff:.10f}")
+        n_seasonal = int(is_seasonal_cat.sum())
+        n_weak_open = int((~is_seasonal_cat & ~is_same_month & (decay_weight > 0)).sum())
+        print(f"  Step2: strong-season rows={n_seasonal} (target-period only, λ_same={lambda_same}), "
+              f"weak-season rows opened={n_weak_open} (all months, λ={lambda_val})")
 
         self.df_raw = df
         return df
 
     # =========================================================
     # Step 3: 季节匹配因子
+    # 优化：建议3 - β按品类分档（强季节β=3.0，弱季节β=1.5，非季节β=1.0）
     # =========================================================
     def step3_seasonal_factor(self):
         df = self.df_raw.copy()
         switch = self.params["seasonal_switch"]
         window = int(self.params["seasonal_window"])
-        beta = self.params["seasonal_beta"]
+        beta_strong = self.params["seasonal_beta"]
+        beta_weak = float(self.params.get("seasonal_beta_weak", 1.5))
         cats = self._get_seasonal_categories()
 
         def in_season(m, target, win):
-            """判定月份 m 是否落在目标月 target 的"前置季节窗口"内。
-
-            窗口定义为 [target-win, target-1]（目标月本身不计入），
-            距离按环形计算，所以 1 月发货、窗口=1 时命中 12 月。
-            这与 Excel 模板一致：目标期 {1,2,3}、窗口=1 时命中月份为 {12, 1, 2}。
-            """
             d = (target - 1 - m) % 12
             return 0 <= d <= (win - 1)
 
@@ -232,21 +265,25 @@ class AllocationEngine:
 
         if switch == 1 and cats:
             df["季节因子_py"] = 1.0
-            mask = df["一级分类"].isin(cats) & \
-                   df["月"].apply(lambda m: any(
-                       in_season(m, tm, window) for tm in target_months
-                   ))
-            df.loc[mask, "季节因子_py"] = beta
+            is_seasonal_cat = df["一级分类"].isin(cats)
+            in_seasonal_window = df["月"].apply(lambda m: any(
+                in_season(m, tm, window) for tm in target_months
+            ))
+            # 强季节品类 + 季节窗口 → β_strong
+            mask_strong = is_seasonal_cat & in_seasonal_window
+            df.loc[mask_strong, "季节因子_py"] = beta_strong
+            # 弱季节品类 + 同月 → β_weak
+            is_same_month = df["月"].apply(lambda m: int(m) in target_months)
+            mask_weak = (~is_seasonal_cat) & is_same_month
+            df.loc[mask_weak, "季节因子_py"] = beta_weak
         else:
             df["季节因子_py"] = 1.0
 
-        if "季节因子_V" in df.columns:
-            mismatches = df[abs(df["季节因子_py"] - df["季节因子_V"]) > 0.01]
-            print(f"  Step3: seasonal factor mismatches vs Excel: {len(mismatches)}")
-
-        n_boosted = int((df["季节因子_py"] > 1).sum())
-        print(f"  Step3: categories={cats}, window=±{window}, beta={beta}, "
-              f"boosted rows={n_boosted}/{len(df)}")
+        n_strong = int((df["季节因子_py"] == beta_strong).sum()) if beta_strong > 1 else 0
+        n_weak = int((df["季节因子_py"] == beta_weak).sum()) if beta_weak > 1 else 0
+        print(f"  Step3: strong β={beta_strong} → {n_strong} rows, "
+              f"weak β={beta_weak} → {n_weak} rows, "
+              f"window=±{window}")
 
         self.df_raw = df
         return df
@@ -437,12 +474,15 @@ class AllocationEngine:
 
     # =========================================================
     # Step 6: 趋势调整 + 最终占比
+    # 优化：建议4 - 趋势因子改用原始单量占比（不加衰减权重和季节因子）
+    # 优化：建议5 - 新品增加订单量门槛（history≤阈值 或 目标期总单量<门槛）
     # =========================================================
     def step6_final_ratio(self, demand_qty=1, apply_trend=True):
         k = self.params["k"]
         a_min = self.params["a_min"]
         a_max = self.params["a_max"]
         new_threshold = self.new_product_threshold
+        min_orders = int(self.params.get("new_product_min_orders", 10))
         alpha = float(self.params.get("alpha_trend", 0.3) or 0.0)
         cap = float(self.params.get("trend_cap", 0.05) or 0.0)
 
@@ -453,7 +493,7 @@ class AllocationEngine:
         if trend_used:
             r_lo, r_hi, f_lo, f_hi = windows
             print(f"  Step6: trend windows recent=[{r_lo},{r_hi}] far=[{f_lo},{f_hi}] "
-                  f"α={alpha} cap=±{cap}")
+                  f"α={alpha} cap=±{cap} (raw data, no decay/seasonal)")
         else:
             print(f"  Step6: trend disabled (α={alpha})")
 
@@ -470,9 +510,12 @@ class AllocationEngine:
 
             n = sw["target_months"]
             history = sw["history_months"]
+            target_orders = int(sw.get("total", 0))
 
-            # 新品：历史出单月数 <= 阈值 → 完全用基准
-            if history <= new_threshold:
+            # 建议5：新品判定 = 历史月数≤阈值 OR 目标期总单量<门槛
+            is_new = (history <= new_threshold) or (target_orders < min_orders)
+
+            if is_new:
                 a = 0.0
             else:
                 a_raw = n / (n + k) if (n + k) > 0 else 0
@@ -486,26 +529,23 @@ class AllocationEngine:
             if total_final > 0:
                 final = {wh: v / total_final for wh, v in final.items()}
 
-            # --- 趋势调整 ---
+            # --- 趋势调整（建议4：用原始单量占比，不加衰减和季节因子） ---
             trend_diff = {wh: 0.0 for wh in WAREHOUSES}
             adjusted = dict(final)
             if trend_used and sku in df_by_sku:
                 g = df_by_sku[sku]
                 rec = g[g["月份序号_py"].between(r_lo, r_hi)]
                 far = g[g["月份序号_py"].between(f_lo, f_hi)]
-                rec_den = rec["加权合计_py"].sum() if len(rec) else 0
-                far_den = far["加权合计_py"].sum() if len(far) else 0
-                if rec_den > 0 and far_den > 0:
+                # 用原始仓点量而非加权量
+                rec_total = rec[WAREHOUSES].sum(axis=1).sum() if len(rec) else 0
+                far_total = far[WAREHOUSES].sum(axis=1).sum() if len(far) else 0
+                if rec_total > 0 and far_total > 0:
                     for wh in WAREHOUSES:
-                        rr = rec[f"加权_{wh}_py"].sum() / rec_den
-                        fr = far[f"加权_{wh}_py"].sum() / far_den
+                        rr = rec[wh].sum() / rec_total
+                        fr = far[wh].sum() / far_total
                         d = rr - fr
                         trend_diff[wh] = d
-                        # 单仓调整幅度限制在 ±cap
                         adjusted[wh] = final[wh] + alpha * max(-cap, min(cap, d))
-                    # 调整后是否重新归一化
-                    #   normalized  : 四仓合计恒为 100%（默认，符合"占比必须等于100%"的要求）
-                    #   raw         : 保留原始调整值（与 Excel 模板 AS 列一致，合计可能 0.97~1.03）
                     if self.params.get("norm_method", "proportional") != "raw":
                         adj_total = sum(adjusted.values())
                         if adj_total > 0:
@@ -521,6 +561,8 @@ class AllocationEngine:
                 "一级分类": sb["info"].get("一级分类", ""),
                 "历史月数": sw["history_months"],
                 "目标期月数": sw["target_months"],
+                "目标期单量": target_orders,
+                "是否新品": "是" if is_new else "否",
                 "收缩权重_a": a,
                 "基准层级": sb["level"],
                 "基准观测数": sb.get("benchmark_n", ""),
@@ -553,7 +595,9 @@ class AllocationEngine:
             })
 
         df_results = pd.DataFrame(results)
-        print(f"  Step6: computed final ratios for {len(df_results)} SKUs")
+        n_new = int((df_results["是否新品"] == "是").sum()) if "是否新品" in df_results.columns else 0
+        print(f"  Step6: computed final ratios for {len(df_results)} SKUs "
+              f"(new products: {n_new}, min_orders={min_orders})")
         return df_results
 
     @staticmethod
