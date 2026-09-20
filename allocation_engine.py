@@ -260,57 +260,14 @@ class AllocationEngine:
         return df
 
     # =========================================================
-    # Step 3: 季节匹配因子
-    # 优化：建议3 - β按品类分档（强季节β=3.0，弱季节β=1.5，非季节β=1.0）
-    # =========================================================
-    def step3_seasonal_factor(self):
-        df = self.df_raw.copy()
-        switch = self.params["seasonal_switch"]
-        window = int(self.params["seasonal_window"])
-        beta_strong = self.params["seasonal_beta"]
-        beta_weak = float(self.params.get("seasonal_beta_weak", 1.5))
-        cats = self._get_seasonal_categories()
-
-        def in_season(m, target, win):
-            d = (target - 1 - m) % 12
-            return 0 <= d <= (win - 1)
-
-        target_months = self._get_target_months()
-
-        if switch == 1 and cats:
-            df["季节因子_py"] = 1.0
-            is_seasonal_cat = df["一级分类"].isin(cats)
-            in_seasonal_window = df["月"].apply(lambda m: any(
-                in_season(m, tm, window) for tm in target_months
-            ))
-            # 强季节品类 + 季节窗口 → β_strong
-            mask_strong = is_seasonal_cat & in_seasonal_window
-            df.loc[mask_strong, "季节因子_py"] = beta_strong
-            # 弱季节品类 + 同月 → β_weak
-            is_same_month = df["月"].apply(lambda m: int(m) in target_months)
-            mask_weak = (~is_seasonal_cat) & is_same_month
-            df.loc[mask_weak, "季节因子_py"] = beta_weak
-        else:
-            df["季节因子_py"] = 1.0
-
-        n_strong = int((df["季节因子_py"] == beta_strong).sum()) if beta_strong > 1 else 0
-        n_weak = int((df["季节因子_py"] == beta_weak).sum()) if beta_weak > 1 else 0
-        print(f"  Step3: strong β={beta_strong} → {n_strong} rows, "
-              f"weak β={beta_weak} → {n_weak} rows, "
-              f"window=±{window}")
-
-        self.df_raw = df
-        return df
-
-    # =========================================================
-    # Step 4: 自身占比
+    # Step 3: 自身占比（原Step4，季节匹配因子已删除）
     # =========================================================
     def _add_weighted_cols(self):
-        """加权列 = 衰减权重 × 季节因子 × 原始量。"""
+        """加权列 = 衰减权重 × 原始量。"""
         df = self.df_raw
         for wh in WAREHOUSES:
-            df[f"加权_{wh}_py"] = df["衰减权重_py"] * df["季节因子_py"] * df[wh]
-        df["加权合计_py"] = df["衰减权重_py"] * df["季节因子_py"] * df[WAREHOUSES].sum(axis=1)
+            df[f"加权_{wh}_py"] = df["衰减权重_py"] * df[wh]
+        df["加权合计_py"] = df["衰减权重_py"] * df[WAREHOUSES].sum(axis=1)
         self.df_raw = df
         return df
 
