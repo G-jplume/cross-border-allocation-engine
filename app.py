@@ -717,6 +717,8 @@ else:
                 engine.mix_mapping = st.session_state.mix_mapping
 
             engine.params["anchor"] = anchor
+            engine.params["target_start"] = target_start_month
+            engine.params["target_end"] = target_end_month
             engine.params["lambda"] = lambda_val
             engine.params["lambda_same_month"] = lambda_same
             engine.params["k"] = k_val
