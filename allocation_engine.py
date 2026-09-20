@@ -125,7 +125,20 @@ class AllocationEngine:
         return (anchor - 1) % 12 + 1
 
     def _get_target_months(self):
-        """目标期包含的月份列表（1-12）。"""
+        """目标期包含的月份列表（1-12），支持跨年。
+
+        优先从 params 的 target_start/target_end 计算，
+        兜底：从"在目标期"列提取，再兜底：返回锚点月份。
+        """
+        ts = self.params.get("target_start")
+        te = self.params.get("target_end")
+        if ts and te:
+            ts, te = int(ts), int(te)
+            if ts <= te:
+                return list(range(ts, te + 1))
+            else:
+                # 跨年：如 11→2 = [11,12,1,2]
+                return list(range(ts, 13)) + list(range(1, te + 1))
         if self.df_raw is not None and "在目标期" in self.df_raw.columns:
             tm = sorted(self.df_raw.loc[self.df_raw["在目标期"] == 1, "月"].dropna().unique())
             if len(tm) > 0:
@@ -220,15 +233,13 @@ class AllocationEngine:
         # 判断是否为强季节品类
         is_seasonal_cat = df["一级分类"].isin(cats) if "一级分类" in df.columns else pd.Series(False, index=df.index)
 
-        # 建议1+2组合：
-        # 强季节品类 + 同月 → in_target & lambda_same (0.95) 衰减
-        # 强季节品类 + 非同月 → 权重0 (保持目标期限制)
-        # 弱季节品类 + 同月 → lambda_same (0.95) 衰减
-        # 弱季节品类 + 非同月 → lambda (0.85) 衰减
-        # 强季节品类的非同月数据权重为0
+        # 强季节品类 + 同月 → lambda_same 衰减（同月指月份数字匹配，不限年份）
+        # 强季节品类 + 非同月 → 权重0（只参考同月历史数据）
+        # 弱季节品类 + 同月 → lambda_same 衰减
+        # 弱季节品类 + 非同月 → lambda 衰减
         decay_weight = np.where(
             is_seasonal_cat,
-            np.where(in_target, lambda_same ** dist.clip(lower=0), 0.0),
+            np.where(is_same_month, lambda_same ** dist.clip(lower=0), 0.0),
             np.where(is_same_month, lambda_same ** dist.clip(lower=0),
                      lambda_val ** dist.clip(lower=0))
         )
@@ -302,9 +313,12 @@ class AllocationEngine:
 
     def step4_self_ratio(self):
         df = self._add_weighted_cols()
+        target_months = self._get_target_months()
 
-        target_df = df[df["在目标期_py"] == 1].copy()
-        grouped = target_df.groupby("运算SKU_py")
+        # 按"同月"取数据计算自身占比（月份数字匹配即可，不限年份）
+        # 这样即使目标期年份超出数据范围，也能用历史同月数据计算
+        same_month_df = df[df["月"].apply(lambda m: int(m) in target_months)].copy()
+        grouped = same_month_df.groupby("运算SKU_py")
 
         sku_weighted = {}
         for sku, group in grouped:
@@ -321,10 +335,11 @@ class AllocationEngine:
         for sku in sku_weighted:
             all_rows = df[df["运算SKU_py"] == sku]
             sku_weighted[sku]["history_months"] = len(all_rows[all_rows[WAREHOUSES].sum(axis=1) > 0])
-            target_rows = all_rows[all_rows["在目标期_py"] == 1]
+            target_rows = same_month_df[same_month_df["运算SKU_py"] == sku]
             sku_weighted[sku]["target_months"] = len(target_rows[target_rows[WAREHOUSES].sum(axis=1) > 0])
 
-        print(f"  Step4: computed self ratios for {len(sku_weighted)} unique 运算SKUs")
+        print(f"  Step4: computed self ratios for {len(sku_weighted)} unique 运算SKUs "
+              f"(target months: {target_months})")
         self.sku_weighted = sku_weighted
         return sku_weighted
 
