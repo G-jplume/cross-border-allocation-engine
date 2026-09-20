@@ -234,12 +234,13 @@ class AllocationEngine:
         is_seasonal_cat = df["一级分类"].isin(cats) if "一级分类" in df.columns else pd.Series(False, index=df.index)
 
         # 强季节品类 + 同月 → lambda_same 衰减（同月指月份数字匹配，不限年份）
-        # 强季节品类 + 非同月 → 权重0（只参考同月历史数据）
+        # 强季节品类 + 非同月 → lambda 衰减（层级回退：无同月数据时用全部月份）
         # 弱季节品类 + 同月 → lambda_same 衰减
         # 弱季节品类 + 非同月 → lambda 衰减
         decay_weight = np.where(
             is_seasonal_cat,
-            np.where(is_same_month, lambda_same ** dist.clip(lower=0), 0.0),
+            np.where(is_same_month, lambda_same ** dist.clip(lower=0),
+                     lambda_val ** dist.clip(lower=0)),
             np.where(is_same_month, lambda_same ** dist.clip(lower=0),
                      lambda_val ** dist.clip(lower=0))
         )
@@ -248,10 +249,12 @@ class AllocationEngine:
         if "在目标期" in df.columns:
             df["在目标期_py"] = df["在目标期"]
 
-        n_seasonal = int(is_seasonal_cat.sum())
+        n_seasonal_same = int((is_seasonal_cat & is_same_month & (decay_weight > 0)).sum())
+        n_seasonal_fallback = int((is_seasonal_cat & ~is_same_month & (decay_weight > 0)).sum())
         n_weak_open = int((~is_seasonal_cat & ~is_same_month & (decay_weight > 0)).sum())
-        print(f"  Step2: strong-season rows={n_seasonal} (target-period only, λ_same={lambda_same}), "
-              f"weak-season rows opened={n_weak_open} (all months, λ={lambda_val})")
+        print(f"  Step2: strong-season same-month={n_seasonal_same} (λ_same={lambda_same}), "
+              f"strong-season fallback={n_seasonal_fallback} (λ={lambda_val}), "
+              f"weak-season rows={n_weak_open} (λ={lambda_val})")
 
         self.df_raw = df
         return df
@@ -315,31 +318,49 @@ class AllocationEngine:
         df = self._add_weighted_cols()
         target_months = self._get_target_months()
 
-        # 按"同月"取数据计算自身占比（月份数字匹配即可，不限年份）
-        # 这样即使目标期年份超出数据范围，也能用历史同月数据计算
-        same_month_df = df[df["月"].apply(lambda m: int(m) in target_months)].copy()
-        grouped = same_month_df.groupby("运算SKU_py")
+        is_same_month = df["月"].apply(lambda m: int(m) in target_months)
+        same_month_df = df[is_same_month].copy()
+        all_grouped = df.groupby("运算SKU_py")
 
         sku_weighted = {}
-        for sku, group in grouped:
+        n_same_month = 0
+        n_fallback = 0
+
+        for sku, all_rows in all_grouped:
+            same_rows = same_month_df[same_month_df["运算SKU_py"] == sku]
+            same_total = same_rows["加权合计_py"].sum() if len(same_rows) > 0 else 0
+
+            if same_total > 0:
+                group = same_rows
+                n_same_month += 1
+                used_months = len(same_rows[same_rows[WAREHOUSES].sum(axis=1) > 0])
+            else:
+                fallback_total = all_rows["加权合计_py"].sum()
+                if fallback_total > 0:
+                    group = all_rows
+                    n_fallback += 1
+                    used_months = len(all_rows[all_rows[WAREHOUSES].sum(axis=1) > 0])
+                else:
+                    continue
+
             total = group["加权合计_py"].sum()
-            if total == 0:
-                continue
             wh_sums = {wh: group[f"加权_{wh}_py"].sum() for wh in WAREHOUSES}
             sku_weighted[sku] = {
                 "total": total,
                 "wh_sums": wh_sums,
                 "self_ratios": {wh: wh_sums[wh] / total for wh in WAREHOUSES},
+                "used_months": used_months,
             }
 
         for sku in sku_weighted:
             all_rows = df[df["运算SKU_py"] == sku]
             sku_weighted[sku]["history_months"] = len(all_rows[all_rows[WAREHOUSES].sum(axis=1) > 0])
-            target_rows = same_month_df[same_month_df["运算SKU_py"] == sku]
-            sku_weighted[sku]["target_months"] = len(target_rows[target_rows[WAREHOUSES].sum(axis=1) > 0])
+            same_rows = same_month_df[same_month_df["运算SKU_py"] == sku]
+            sku_weighted[sku]["target_months"] = len(same_rows[same_rows[WAREHOUSES].sum(axis=1) > 0])
 
-        print(f"  Step4: computed self ratios for {len(sku_weighted)} unique 运算SKUs "
-              f"(target months: {target_months})")
+        print(f"  Step4: {len(sku_weighted)} SKUs "
+              f"(same-month: {n_same_month}, fallback: {n_fallback}, "
+              f"target months: {target_months})")
         self.sku_weighted = sku_weighted
         return sku_weighted
 
@@ -523,7 +544,7 @@ class AllocationEngine:
                 {"benchmark": {wh: 0.25 for wh in WAREHOUSES}, "level": "全公司", "info": {}}
             )
 
-            n = sw["target_months"]
+            n = sw.get("used_months", sw["target_months"])
             history = sw["history_months"]
             target_orders = int(sw.get("total", 0))
 
@@ -575,7 +596,7 @@ class AllocationEngine:
                 "室内外": sb["info"].get("室内外", ""),
                 "一级分类": sb["info"].get("一级分类", ""),
                 "历史月数": sw["history_months"],
-                "目标期月数": sw["target_months"],
+                "目标期月数": sw.get("used_months", sw["target_months"]),
                 "目标期单量": target_orders,
                 "是否新品": "是" if is_new else "否",
                 "收缩权重_a": a,
