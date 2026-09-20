@@ -367,25 +367,29 @@ def compute_aggregate_ratios(df_sku):
             if cand in df_sku.columns:
                 wh_cols[wh] = cand
                 break
+    valid_whs = [wh for wh in WAREHOUSES if wh in wh_cols]
+    if not valid_whs:
+        st.warning("⚠️ 引擎输出中未找到仓库占比列，可能无SKU通过计算。请检查数据或参数设置。")
+        return {}
     agg = {}
     for level in ["一级分类", "室内外", "SPU"]:
         if level not in df_sku.columns:
             continue
         g = df_sku.groupby(level).agg(
-            **{wh: (wh_cols[wh], "mean") for wh in WAREHOUSES}
+            **{wh: (wh_cols[wh], "mean") for wh in valid_whs}
         ).reset_index()
-        g.columns = [level] + [f"占比_{wh}" for wh in WAREHOUSES]
-        tot = sum(g[f"占比_{wh}"] for wh in WAREHOUSES)
-        for wh in WAREHOUSES:
+        g.columns = [level] + [f"占比_{wh}" for wh in valid_whs]
+        tot = sum(g[f"占比_{wh}"] for wh in valid_whs)
+        for wh in valid_whs:
             g[f"占比_{wh}"] = g[f"占比_{wh}"] / tot
         g.insert(1, "SKU数", df_sku.groupby(level).size().values)
         agg[level] = g
 
-    overall = {wh: df_sku[wh_cols[wh]].mean() for wh in WAREHOUSES}
+    overall = {wh: df_sku[wh_cols[wh]].mean() for wh in valid_whs}
     tot = sum(overall.values())
     agg["全公司"] = pd.DataFrame([{
         "层级": "全公司", "SKU数": len(df_sku),
-        **{f"占比_{wh}": overall[wh] / tot for wh in WAREHOUSES}
+        **{f"占比_{wh}": overall[wh] / tot for wh in valid_whs}
     }])
     return agg
 
@@ -748,6 +752,11 @@ else:
                 engine.step5_benchmark()
                 st.write("步骤6/7：最终占比合并...")
                 df_results = engine.step6_final_ratio(demand_qty=1)
+
+                if df_results.empty:
+                    st.warning("⚠️ 引擎未产出任何SKU结果。请检查数据是否包含目标期月份的出单记录。")
+                    status.update(label="计算完成（0个SKU）", state="complete")
+                    st.stop()
 
                 drop_cols = [c for c in df_results.columns if c.startswith("落货量")]
                 df_results = df_results.drop(columns=drop_cols)
