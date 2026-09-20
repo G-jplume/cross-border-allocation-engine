@@ -57,7 +57,7 @@ GUIDE_MD = """# 分仓占比计算引擎 - 使用说明
 
 核心能力：
 - 基于历史出单数据计算各 SKU 的分仓占比，支持多年份数据
-- 时间衰减加权 + 季节匹配因子 + 趋势因子三层加权体系
+- 时间衰减加权 + 趋势因子两层加权体系
 - 基准占比层级回退：SPU → 一级分类 → 室内外 → 全公司，每层贝叶斯收缩
 - 减仓优化：月均<3单且占比<5%的仓位自动减仓，占比等比分配到其他仓
 - 四仓占比合计恒为 100%，落货量最大余额法保证整数精确
@@ -75,9 +75,8 @@ GUIDE_MD = """# 分仓占比计算引擎 - 使用说明
 分为五个参数分组，从上到下依次为：
 - ① 目标发货月份：选择起始年月和结束年月（如 2026年12月 → 2027年3月）
 - ② 时间衰减加权：同月跨年衰减率 λ_same、非同月衰减率 λ
-- ③ 季节匹配因子：强季节 β、弱季节 β_weak、窗口范围 N、适用品类（默认折叠）
-- ④ 趋势因子 α：趋势因子 α、单仓调整上限、归一化方式（默认折叠）
-- ⑤ 新品与基准：新品阈值、新品订单量门槛、收缩强度 k、权重上/下限、品类层观测数（默认折叠）
+- ③ 趋势因子 α：趋势因子 α、单仓调整上限、归一化方式（默认折叠）
+- ④ 新品与基准：新品阈值、新品订单量门槛、收缩强度 k、权重上/下限、品类层观测数（默认折叠）
 
 ### 主区域 — 操作区
 
@@ -112,23 +111,11 @@ GUIDE_MD = """# 分仓占比计算引擎 - 使用说明
 分类逻辑：
 - 强季节品类（庭院等）：只看目标期同月数据，用 λ_same 衰减
 - 弱季节品类：同月数据用 λ_same 衰减，非同月数据用 λ 衰减
-- 强季节品类的非同月数据权重为 0（不参与计算）
+- 强季节品类的非同月数据：层级回退时用 λ 衰减（无同月数据时启用）
 
-### 3.3 季节匹配因子
+### 3.3 趋势因子 α
 
-对同月/同季数据的权重进行额外放大。作用于加权层，与趋势因子作用层不同，互不冲突。
-
-| 参数 | 默认值 | 说明 |
-|---|---|---|
-| 强季节增强倍数 β | 3.0 | 强季节品类（庭院等）同季数据权重放大倍数 |
-| 弱季节增强倍数 β_weak | 1.5 | 弱季节品类同月数据权重放大倍数。1.0=不放大 |
-| 季节窗口范围 N | 1 | 窗口 = 目标月前 N 个月（环形距离）。N=1：发1月货→命中12月 |
-
-适用品类：从上传数据中动态识别，默认勾选「庭院、草坪与花园」和「庭院」，可手动增删。
-
-### 3.4 趋势因子 α
-
-比较「去年同期」与「前年同期」的分仓占比差，把趋势方向叠加到最终占比上。使用原始单量占比计算（不受衰减权重和季节因子干扰）。
+比较「去年同期」与「前年同期」的分仓占比差，把趋势方向叠加到最终占比上。使用原始单量占比计算。
 
 | 参数 | 默认值 | 说明 |
 |---|---|---|
@@ -136,7 +123,7 @@ GUIDE_MD = """# 分仓占比计算引擎 - 使用说明
 | 单仓调整上限 | 0.05 | 每个仓库的趋势调整幅度不超过 ±5% |
 | 归一化方式 | 归一化 | 调整后四仓占比缩放到合计 100% |
 
-### 3.5 新品与基准
+### 3.4 新品与基准
 
 控制新品判定和自身数据与基准的混合比例。
 
@@ -177,7 +164,7 @@ GUIDE_MD = """# 分仓占比计算引擎 - 使用说明
 ### 4.3 计算结果
 
 计算完成后展示：
-- 自动体检：四仓占比合计=100%、季节因子命中行数、趋势因子生效数
+- 自动体检：四仓占比合计=100%、趋势因子生效数
 - KPI卡片：美西、美东、美南GA、美南TX 四仓平均占比
 - SKU级表格：5个分页Tab（调整后/最终/自身/基准/趋势差），每个Tab只显示4仓+基础列
 - 聚合层级：一级分类、室内外、SPU、全公司四个 Tab，展示各层级的分仓占比
@@ -212,15 +199,12 @@ GUIDE_MD = """# 分仓占比计算引擎 - 使用说明
 混用SKU映射表把源SKU合并到相似SKU；未映射的取「-」前部分作为运算SKU。
 
 ### 步骤2：时间衰减加权
-强季节品类只看目标期同月数据，用 λ_same（0.95）跨年衰减。弱季节品类放开全部月份，同月用 λ_same，非同月用 λ（0.85）。
+强季节品类同月数据用 λ_same（0.95）跨年衰减，无同月数据时回退用 λ（0.85）衰减全部月份。弱季节品类同月用 λ_same，非同月用 λ（0.85）。
 
-### 步骤3：季节匹配因子
-强季节品类 + 季节窗口内 → 权重 × β（3.0）。弱季节品类 + 同月 → 权重 × β_weak（1.5）。其他 × 1.0。
+### 步骤3：自身占比
+加权后的各仓出单量 ÷ 加权合计，逐仓计算。层级回退：有同月数据时优先用同月，无同月数据时用全部历史数据。
 
-### 步骤4：自身占比
-加权后的各仓出单量 ÷ 加权合计，逐仓计算。
-
-### 步骤5：基准占比
+### 步骤4：基准占比
 层级回退 + 贝叶斯收缩：
 
 | 优先级 | 基准来源 | 说明 |
@@ -235,14 +219,14 @@ GUIDE_MD = """# 分仓占比计算引擎 - 使用说明
 
 贝叶斯收缩公式：子层权重 = n / (n + k_cat)，父层权重 = k_cat / (n + k_cat)。k_cat=12时，n=12则子层父层各50%。
 
-### 步骤6：最终占比
+### 步骤5：最终占比
 最终占比 = 自身权重 × 自身占比 + (1-自身权重) × 基准占比，再叠加趋势调整，最后归一化到 100%。
 
 新品（历史月数≤2 或 目标期单量<10）自身权重=0，完全使用基准。
 
-趋势调整用原始单量占比（不受衰减和季节因子干扰），比较去年同期 vs 前年同期的占比差。
+趋势调整用原始单量占比，比较去年同期 vs 前年同期的占比差。
 
-### 步骤7：落货量
+### 步骤6：落货量
 占比 × 批量，最大余额法保证整数合计精确等于批量。
 
 ### 减仓优化（可选）
@@ -270,8 +254,8 @@ GUIDE_MD = """# 分仓占比计算引擎 - 使用说明
 ### Q6：四仓占比一定等于100%吗？
 是的。引擎计算后自动归一化，趋势调整后再次归一化，微调时自动补足，自检验证偏差 < 1e-9。
 
-### Q7：趋势因子和季节因子会冲突吗？
-不会。季节因子作用于加权层（步骤3），趋势因子作用于最终占比层（步骤6），两者作用层不同。趋势因子用原始数据计算，不受衰减和季节因子干扰。
+### Q7：趋势因子用什么数据计算？
+趋势因子用原始单量占比（不加衰减权重），比较去年同期 vs 前年同期的分仓占比差。与时间衰减加权作用层不同，互不干扰。
 """
 
 _col_title, _col_dl = st.columns([4, 1])
@@ -465,30 +449,8 @@ st.sidebar.caption(
     f"同月：去年{lambda_same:.0%}，前年{lambda_same**2:.0%} | 非同月：1月前{lambda_val:.0%}，6月前{lambda_val**6:.0%}"
 )
 
-# ---------- 季节匹配 ----------
-with st.sidebar.expander("③ 季节匹配因子", expanded=False):
-    st.caption("目标月前N个月历史数据权重放大β倍，与趋势因子不冲突。")
-
-    seasonal_on = st.checkbox("启用季节因子", value=True)
-
-    if seasonal_on:
-        beta = st.slider(
-            "强季节增强倍数 β", 1.0, 5.0, 3.0, 0.1,
-            help="强季节品类同月数据权重放大倍数。"
-        )
-        beta_weak = st.slider(
-            "弱季节增强倍数 β_weak", 1.0, 3.0, 1.5, 0.1,
-            help="弱季节品类同月数据权重放大倍数。"
-        )
-        st.caption(f"强β={beta:.1f}，弱β={beta_weak:.1f}，非同月×1.0")
-        seasonal_window = st.slider(
-            "季节窗口范围 N", 1, 3, 1,
-            help="目标月前N个月权重放大（环形距离）。N=1→命中前1月，N=3→命中前3月。"
-        )
-    else:
-        beta, beta_weak, seasonal_window = 1.0, 1.0, 1
-
-if seasonal_on and st.session_state.df_raw is not None and "一级分类" in st.session_state.df_raw.columns:
+# ---------- 季节适用品类（保留选择，删除β因子） ----------
+if st.session_state.df_raw is not None and "一级分类" in st.session_state.df_raw.columns:
     _cats_all = sorted(
         st.session_state.df_raw["一级分类"].dropna().astype(str).unique().tolist()
     )
@@ -498,10 +460,8 @@ if seasonal_on and st.session_state.df_raw is not None and "一级分类" in st.
 else:
     seasonal_cats = []
 
-eff("季节匹配因子", "与衰减因子相乘，放大同季数据权重。")
-
 # ---------- 趋势因子 ----------
-with st.sidebar.expander("④ 趋势因子 α", expanded=False):
+with st.sidebar.expander("③ 趋势因子 α", expanded=False):
     st.caption("去年vs前年同期占比差，叠加到最终占比。")
 
     alpha_trend = st.slider(
@@ -520,7 +480,7 @@ with st.sidebar.expander("④ 趋势因子 α", expanded=False):
 norm_method = "proportional"
 
 # ---------- 新品与基准 ----------
-with st.sidebar.expander("⑤ 新品与基准", expanded=False):
+with st.sidebar.expander("④ 新品与基准", expanded=False):
     st.caption("新品判定与自身/基准混合比例。基准自动计算。")
 
     new_product_threshold = st.slider(
@@ -692,7 +652,7 @@ else:
             _cats_all = [c for c in _cats_all if c.strip()]
             _default_cats = [c for c in _cats_all if c.strip() in ("庭院、草坪与花园", "庭院")]
             st.markdown("**🌿 季节适用品类**")
-            st.caption("勾选需要季节性增强的品类（如庭院类），不勾选则不应用季节因子")
+            st.caption("勾选强季节品类（如庭院类），同月数据用λ_same衰减；未勾选的品类同月也用λ_same但非同月用λ")
             seasonal_cats = st.multiselect(
                 "选择品类",
                 options=_cats_all,
@@ -727,10 +687,6 @@ else:
             engine.params["alpha_trend"] = alpha_trend
             engine.params["trend_cap"] = trend_cap
             engine.params["norm_method"] = norm_method
-            engine.params["seasonal_switch"] = 1 if (seasonal_on and seasonal_cats) else 0
-            engine.params["seasonal_beta"] = beta
-            engine.params["seasonal_beta_weak"] = beta_weak
-            engine.params["seasonal_window"] = seasonal_window
             engine.params["new_product_min_orders"] = new_product_min_orders
             engine.new_product_threshold = new_product_threshold
             engine.k_cat = float(k_cat)
@@ -742,17 +698,15 @@ else:
                     axis=1
                 )
 
-                st.write("步骤1/7：SKU映射...")
+                st.write("步骤1/6：SKU映射...")
                 engine.step1_sku_mapping()
-                st.write("步骤2/7：时间衰减加权...")
+                st.write("步骤2/6：时间衰减加权...")
                 engine.step2_decay_weight()
-                st.write("步骤3/7：季节匹配因子...")
-                engine.step3_seasonal_factor()
-                st.write("步骤4/7：自身占比计算...")
+                st.write("步骤3/6：自身占比计算...")
                 engine.step4_self_ratio()
-                st.write("步骤5/7：基准占比计算...")
+                st.write("步骤4/6：基准占比计算...")
                 engine.step5_benchmark()
-                st.write("步骤6/7：最终占比合并...")
+                st.write("步骤5/6：最终占比合并...")
                 df_results = engine.step6_final_ratio(demand_qty=1)
 
                 if df_results.empty:
@@ -765,7 +719,7 @@ else:
 
                 st.session_state.agg_results = compute_aggregate_ratios(df_results)
 
-                st.write("步骤7/7：减仓优化 & 自检...")
+                st.write("步骤6/6：减仓优化 & 自检...")
                 if reduction_on:
                     df_results, reduction_summary = apply_warehouse_reduction(
                         engine, df_results, 3.0, 0.05
