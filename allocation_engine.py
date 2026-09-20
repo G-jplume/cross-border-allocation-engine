@@ -230,20 +230,37 @@ class AllocationEngine:
         target_months = self._get_target_months()
         is_same_month = df["月"].apply(lambda m: int(m) in target_months)
 
+        # 月份相似度权重：同月=1.0，相邻月=0.6，隔2月=0.3，隔3月以上=0.1
+        def month_similarity(m, target_mths):
+            m = int(m)
+            best = 0.1
+            for tm in target_mths:
+                d = abs(m - tm)
+                d = min(d, 12 - d)  # 环形距离
+                if d == 0:
+                    return 1.0
+                elif d == 1:
+                    best = max(best, 0.6)
+                elif d == 2:
+                    best = max(best, 0.3)
+            return best
+
+        month_sim = df["月"].apply(lambda m: month_similarity(m, target_months))
+
         # 判断是否为强季节品类
         is_seasonal_cat = df["一级分类"].isin(cats) if "一级分类" in df.columns else pd.Series(False, index=df.index)
 
-        # 强季节品类 + 同月 → lambda_same 衰减（同月指月份数字匹配，不限年份）
-        # 强季节品类 + 非同月 → lambda 衰减（层级回退：无同月数据时用全部月份）
-        # 弱季节品类 + 同月 → lambda_same 衰减
-        # 弱季节品类 + 非同月 → lambda 衰减
-        decay_weight = np.where(
-            is_seasonal_cat,
-            np.where(is_same_month, lambda_same ** dist.clip(lower=0),
-                     lambda_val ** dist.clip(lower=0)),
-            np.where(is_same_month, lambda_same ** dist.clip(lower=0),
-                     lambda_val ** dist.clip(lower=0))
+        # 时间衰减 × 月份相似度
+        # 强季节品类 + 同月 → λ_same^dist × 1.0
+        # 强季节品类 + 非同月 → λ^dist × month_sim（层级回退时启用）
+        # 弱季节品类 + 同月 → λ_same^dist × 1.0
+        # 弱季节品类 + 非同月 → λ^dist × month_sim
+        time_decay = np.where(
+            is_same_month,
+            lambda_same ** dist.clip(lower=0),
+            lambda_val ** dist.clip(lower=0)
         )
+        decay_weight = time_decay * month_sim
         df["衰减权重_py"] = decay_weight
 
         if "在目标期" in df.columns:
@@ -478,6 +495,7 @@ class AllocationEngine:
         min_orders = int(self.params.get("new_product_min_orders", 10))
         alpha = float(self.params.get("alpha_trend", 0.3) or 0.0)
         cap = float(self.params.get("trend_cap", 0.05) or 0.0)
+        trend_min_orders = int(self.params.get("trend_min_orders", 30))
 
         df = self.df_raw
         windows = self._resolve_trend_windows() if apply_trend and alpha > 0 else None
@@ -486,7 +504,7 @@ class AllocationEngine:
         if trend_used:
             r_lo, r_hi, f_lo, f_hi = windows
             print(f"  Step6: trend windows recent=[{r_lo},{r_hi}] far=[{f_lo},{f_hi}] "
-                  f"α={alpha} cap=±{cap} (raw data, no decay/seasonal)")
+                  f"α={alpha} cap=±{cap} min_orders={trend_min_orders} (raw data, dynamic α)")
         else:
             print(f"  Step6: trend disabled (α={alpha})")
 
@@ -522,9 +540,10 @@ class AllocationEngine:
             if total_final > 0:
                 final = {wh: v / total_final for wh, v in final.items()}
 
-            # --- 趋势调整（建议4：用原始单量占比，不加衰减和季节因子） ---
+            # --- 趋势调整（用原始单量占比，加单量门槛+动态α） ---
             trend_diff = {wh: 0.0 for wh in WAREHOUSES}
             adjusted = dict(final)
+            trend_alpha = 0.0  # 动态α，按数据量调整
             if trend_used and sku in df_by_sku:
                 g = df_by_sku[sku]
                 rec = g[g["月份序号_py"].between(r_lo, r_hi)]
@@ -532,13 +551,20 @@ class AllocationEngine:
                 # 用原始仓点量而非加权量
                 rec_total = rec[WAREHOUSES].sum(axis=1).sum() if len(rec) else 0
                 far_total = far[WAREHOUSES].sum(axis=1).sum() if len(far) else 0
-                if rec_total > 0 and far_total > 0:
+                trend_total = rec_total + far_total
+                # 单量门槛：去年+前年同期总单量 < 门槛 → 跳过趋势
+                if trend_total >= trend_min_orders:
+                    # 动态α：>100单用原始α，30-100单用α/2，<30单不生效
+                    if trend_total >= 100:
+                        trend_alpha = alpha
+                    else:
+                        trend_alpha = alpha * 0.5
                     for wh in WAREHOUSES:
                         rr = rec[wh].sum() / rec_total
                         fr = far[wh].sum() / far_total
                         d = rr - fr
                         trend_diff[wh] = d
-                        adjusted[wh] = final[wh] + alpha * max(-cap, min(cap, d))
+                        adjusted[wh] = final[wh] + trend_alpha * max(-cap, min(cap, d))
                     if self.params.get("norm_method", "proportional") != "raw":
                         adj_total = sum(adjusted.values())
                         if adj_total > 0:
@@ -557,6 +583,7 @@ class AllocationEngine:
                 "目标期单量": target_orders,
                 "是否新品": "是" if is_new else "否",
                 "收缩权重_a": a,
+                "趋势alpha": trend_alpha,
                 "基准层级": sb["level"],
                 "基准观测数": sb.get("benchmark_n", ""),
                 "基准父层": sb.get("benchmark_parent", ""),
