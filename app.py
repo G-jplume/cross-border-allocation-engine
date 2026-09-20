@@ -929,3 +929,4 @@ if st.session_state.df_results is not None:
                                data=agg_results["一级分类"].to_csv(index=False).encode("utf-8-sig"),
                                file_name="分仓占比结果_一级分类.csv", mime="text/csv",
                                use_container_width=True)
+
