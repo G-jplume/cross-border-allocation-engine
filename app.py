@@ -163,7 +163,7 @@ def eff(label, desc, required=True):
 
 # ---------- 目标发货月份 ----------
 st.sidebar.subheader("① 目标发货月份")
-st.sidebar.caption("设定目标发货的起止年月，支持跨年（如2026年12月→2027年3月）。")
+st.sidebar.caption("支持跨年（如2026年12月→2027年3月）。")
 
 _ym_options = {f"{y}年{m}月": (y, m) for y in range(2024, 2031) for m in range(1, 13)}
 _ym_labels = list(_ym_options.keys())
@@ -200,60 +200,45 @@ while s <= target_end_seq:
     s += 1
 
 eff("目标发货月份",
-    f"锚点 = {anchor_year}年{anchor_month}月。"
-    f"目标期：{target_start_year}年{target_start_month}月 → {target_end_year}年{target_end_month}月"
-    f"（含{len(target_months_set)}个月份编号：{sorted(target_months_set)}）。"
-    "强季节品类只看目标期同月，弱季节品类放开全部月份。")
+    f"锚点={anchor_year}年{anchor_month}月，"
+    f"目标期：{target_start_year}年{target_start_month}月→{target_end_year}年{target_end_month}月"
+    f"（{len(target_months_set)}个月份）。强季节只看目标期同月，弱季节放开全部。")
 
 # ---------- 时间衰减 ----------
 st.sidebar.subheader("② 时间衰减加权")
-st.sidebar.caption(
-    "强季节品类只看目标期同月数据，弱季节品类放开全部月份。\n"
-    "同月跨年用 λ_same（更高），非同月用 λ（更低）。"
-)
+st.sidebar.caption("强季节只看同月，弱季节看全部。同月跨年用λ_same，非同月用λ。")
 
 lambda_val = st.sidebar.slider(
     "非同月衰减速度 λ", 0.50, 1.00, 0.85, 0.01,
-    help="弱季节品类的非同月数据按此衰减。0.85=每月衰减15%。"
+    help="弱季节非同月数据衰减率。0.85=每月衰减15%。"
 )
 lambda_same = st.sidebar.slider(
     "同月跨年衰减速度 λ_same", 0.80, 1.00, 0.95, 0.01,
-    help="同月数据跨年衰减。0.95=去年同月保留95%，前年同月保留90%。"
+    help="同月跨年衰减率。0.95=去年保留95%。"
 )
 st.sidebar.caption(
-    f"同月：去年{lambda_same:.0%}，前年{lambda_same**2:.0%} | "
-    f"非同月：1个月前{lambda_val:.0%}，6个月前{lambda_val**6:.0%}"
+    f"同月：去年{lambda_same:.0%}，前年{lambda_same**2:.0%} | 非同月：1月前{lambda_val:.0%}，6月前{lambda_val**6:.0%}"
 )
 
 # ---------- 季节匹配 ----------
 st.sidebar.subheader("③ 季节匹配因子")
-st.sidebar.caption(
-    "对季节性品类，把「目标月之前 N 个月」的历史数据权重放大 β 倍，"
-    "让去年同季的表现主导预测。**作用于加权层（步骤③），与趋势因子作用层不同，两者不冲突。**"
-)
+st.sidebar.caption("目标月前N个月历史数据权重放大β倍，与趋势因子不冲突。")
 
 seasonal_on = st.sidebar.checkbox("启用季节因子", value=True)
 
 if seasonal_on:
     beta = st.sidebar.slider(
         "强季节增强倍数 β", 1.0, 5.0, 3.0, 0.1,
-        help="强季节品类（如庭院）同月数据权重放大倍数。"
+        help="强季节品类同月数据权重放大倍数。"
     )
     beta_weak = st.sidebar.slider(
         "弱季节增强倍数 β_weak", 1.0, 3.0, 1.5, 0.1,
-        help="弱季节品类同月数据权重放大倍数。1.0=不放大。"
+        help="弱季节品类同月数据权重放大倍数。"
     )
-    st.sidebar.caption(
-        f"强季节 β={beta:.1f}，弱季节 β={beta_weak:.1f}，非同月 ×1.0"
-    )
+    st.sidebar.caption(f"强β={beta:.1f}，弱β={beta_weak:.1f}，非同月×1.0")
     seasonal_window = st.sidebar.slider(
         "季节窗口范围 N", 1, 3, 1,
-        help=(
-            "窗口 = 目标月之前 N 个月（目标月本身不计入），距离按环形计算。\n"
-            "N=1（默认）：目标月前1个月。发1月货 → 命中12月\n"
-            "N=2：目标月前2个月。发1月货 → 命中11、12月\n"
-            "N=3：目标月前3个月。发1月货 → 命中10、11、12月"
-        )
+        help="目标月前N个月权重放大（环形距离）。N=1→命中前1月，N=3→命中前3月。"
     )
 else:
     beta, beta_weak, seasonal_window = 1.0, 1.0, 1
@@ -269,60 +254,46 @@ if seasonal_on and st.session_state.df_raw is not None and "一级分类" in st.
 else:
     seasonal_cats = []
 
-eff("季节匹配因子", "作用于加权层（步骤③），与衰减因子相乘，放大同季历史数据权重。")
+eff("季节匹配因子", "与衰减因子相乘，放大同季数据权重。")
 
 # ---------- 趋势因子 ----------
 st.sidebar.subheader("④ 趋势因子 α")
-st.sidebar.caption(
-    "比较「去年同期」与「前年同期」的分仓占比差，把趋势方向叠加到最终占比上。"
-)
+st.sidebar.caption("去年vs前年同期占比差，叠加到最终占比。")
 
 alpha_trend = st.sidebar.slider(
     "趋势因子 α", 0.0, 1.0, 0.3, 0.05,
-    help=(
-        "趋势差 × α 叠加到最终占比。\n"
-        "α=0：关闭趋势调整\n"
-        "α=0.3（默认）：叠加30%的趋势差\n"
-        "α=1.0：完全采用趋势差（激进）"
-    )
+    help="趋势差×α叠加到最终占比。0=关闭，0.3=默认，1.0=激进。"
 )
 trend_cap = st.sidebar.slider(
     "单仓调整上限", 0.0, 0.20, 0.05, 0.01,
-    help="每个仓库的趋势调整幅度不超过 ±此值，防止单个异常月份把占比带偏"
+    help="单仓趋势调整幅度上限，防异常月份带偏。"
 )
 if alpha_trend == 0:
     st.sidebar.caption("⚪ α=0，趋势调整已关闭")
 else:
-    st.sidebar.caption(
-        f"🟢 趋势窗口 = 去年同期 vs 前年同期，单仓最多调整 ±{trend_cap:.0%}"
-    )
+    st.sidebar.caption(f"🟢 去年vs前年同期，单仓最多±{trend_cap:.0%}")
 
 norm_method = "proportional"
 
 # ---------- 新品与基准 ----------
 st.sidebar.subheader("⑤ 新品与基准")
-st.sidebar.caption("控制新品判定、以及自身数据与基准的混合比例。基准自动从原始数据计算。")
+st.sidebar.caption("新品判定与自身/基准混合比例。基准自动计算。")
 
 new_product_threshold = st.sidebar.slider(
     "新品阈值（月）", 1, 12, 2,
-    help="历史出单月数 ≤ 此值的 SKU 视为新品，完全使用基准占比"
+    help="历史出单月数≤此值视为新品，完全用基准占比。"
 )
 new_product_min_orders = st.sidebar.slider(
     "新品订单量门槛", 1, 100, 10,
-    help="目标期总单量 < 此值也视为新品，避免低单量SKU分仓偶然性"
+    help="目标期总单量<此值也视为新品，避免低单量偶然性。"
 )
 st.sidebar.caption(
-    f"新品判定：历史月数≤{new_product_threshold} 或 目标期单量<{new_product_min_orders}"
+    f"新品：历史月数≤{new_product_threshold} 或 目标期单量<{new_product_min_orders}"
 )
 
 k_val = st.sidebar.slider(
     "收缩强度 k", 1, 20, 6,
-    help=(
-        "自身数据与基准的混合比例。\n"
-        "公式：自身权重 = n / (n + k)，n = 目标期月数\n"
-        "k=6（默认）：目标期6个月 → 自身50%、基准50%\n"
-        "k越大越信任基准，k越小越信任SKU自身历史"
-    )
+    help="自身权重=n/(n+k)，n=目标期月数。k越大越信基准，越小越信自身。"
 )
 _est_n = target_end_month - target_start_month + 1
 st.sidebar.caption(
@@ -334,26 +305,17 @@ st.sidebar.caption(
 col_a1, col_a2 = st.sidebar.columns(2)
 with col_a1:
     a_min = st.slider("权重下限", 0.0, 0.5, 0.0, 0.05,
-                      help="自身数据的最低权重。0=新品完全用基准")
+                      help="自身数据最低权重。0=新品完全用基准。")
 with col_a2:
     a_max = st.slider("权重上限", 0.5, 1.0, 0.9, 0.05,
-                      help="自身数据的最高权重。0.9=最多90%用自身数据")
+                      help="自身数据最高权重。0.9=最多90%用自身。")
 
 k_cat = st.sidebar.slider(
     "品类层最小等效观测数", 3, 50, 12,
-    help=(
-        "基准计算中的贝叶斯收缩参数。\n"
-        "公式：子层权重 = n / (n + k_cat)，n = 该层目标期实际观测行数\n"
-        "k_cat=12（默认）：\n"
-        "  · n=12时 → 子层50%、父层50%（各半）\n"
-        "  · n=88时 → 子层88%、父层12%（数据充足，信任子层）\n"
-        "  · n=4时  → 子层25%、父层75%（数据少，拉向父层均值）\n"
-        "k_cat越大越保守——子层样本少时更快被拉向上层均值"
-    )
+    help="基准贝叶斯收缩参数。子层权重=n/(n+k_cat)。k_cat越大越保守，数据少时更快拉向父层。"
 )
 st.sidebar.caption(
-    f"k_cat={int(k_cat)}：n={int(k_cat)}时子层父层各占50%，"
-    f"n>{int(k_cat)}时偏向子层自身，n<{int(k_cat)}时偏向父层均值"
+    f"k_cat={int(k_cat)}：n={int(k_cat)}时各占50%，n大偏向子层，n小偏向父层。"
 )
 
 # ==========================================================
@@ -477,7 +439,7 @@ else:
             default=_default_cats,
             key="seasonal_cats_main",
         )
-    reduction_on = st.checkbox("启用减仓优化（月均<3单且占比<5%的仓点按比例均分到其他仓）", value=False)
+    reduction_on = st.checkbox("减仓优化（月均<3单且占比<5%的仓按比例均分到其他仓）", value=False)
     if st.button("开始计算", type="primary", use_container_width=True):
         with st.spinner("计算中..."):
             try:
@@ -570,7 +532,7 @@ if st.session_state.df_results is not None:
     reduction_summary = st.session_state.get("reduction_summary")
     if reduction_on and reduction_summary and reduction_summary["n_reduced_skus"] > 0:
         with st.expander(f"📦 减仓优化（{reduction_summary['n_reduced_skus']}个SKU, {reduction_summary['n_reduced_slots']}个仓位）", expanded=False):
-            st.caption("仅影响SKU层分仓占比，上层聚合使用减仓前原始数据。")
+            st.caption("仅影响SKU层，上层聚合用减仓前原始数据。")
 
     col1, col2, col3, col4 = st.columns(4)
     col1.metric("运算SKU 总数", f"{len(df_r):,}")
@@ -629,14 +591,8 @@ if st.session_state.df_results is not None:
     # 主区域 4：占比微调（锁定合计 100%）
     # ======================================================
     st.subheader("4. 占比微调")
-    st.caption(
-        "对某个SKU的分仓占比有业务判断时，可在此直接改。"
-        "改任意一个仓，其余三个仓会按原比例自动补足，**合计始终锁定 100%**。"
-    )
-    st.info(
-        "🔒 **四仓合计 = 100% 保障**：引擎计算后自动归一化 → 趋势调整后再次归一化 → "
-        "微调时自动补足 → 自检验证偏差 < 1e-9"
-    )
+    st.caption("改任意一仓，其余三仓按原比例自动补足，合计始终100%。")
+    st.info("🔒 四仓合计=100%：计算归一化→趋势归一化→微调补足→自检偏差<1e-9")
 
     adj_sku = st.selectbox("选择要微调的SKU", sorted(df_r["SKU"].astype(str)),
                            key="tune_sku")
@@ -663,7 +619,7 @@ if st.session_state.df_results is not None:
 
         with c_right:
             st.markdown("**一键锁定到 100%**")
-            st.caption("点击后：以你改动最多的那个仓为准，其余三仓按原比例自动补足")
+            st.caption("以改动最大的仓为准，其余三仓按原比例补足。")
             if st.button("按改动自动补足到 100%", use_container_width=True):
                 deltas = {wh: abs(new_vals[wh] - base[wh]) for wh in WAREHOUSES}
                 pivot = max(deltas, key=deltas.get)
