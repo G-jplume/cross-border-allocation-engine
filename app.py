@@ -427,20 +427,44 @@ st.subheader("2. 开始计算")
 if st.session_state.df_raw is None:
     st.info("请先上传数据，或点击「使用示例数据」")
 else:
-    if seasonal_on and "一级分类" in st.session_state.df_raw.columns:
-        _cats_all = sorted(
-            st.session_state.df_raw["一级分类"].dropna().astype(str).unique().tolist()
-        )
-        _cats_all = [c for c in _cats_all if c.strip()]
-        _default_cats = [c for c in _cats_all if c.strip() in ("庭院、草坪与花园", "庭院")]
-        seasonal_cats = st.multiselect(
-            "季节适用品类（启用季节因子后显示）",
-            options=_cats_all,
-            default=_default_cats,
-            key="seasonal_cats_main",
-        )
-    reduction_on = st.checkbox("减仓优化（月均<3单且占比<5%的仓按比例均分到其他仓）", value=False)
-    if st.button("开始计算", type="primary", use_container_width=True):
+    with st.container(border=True):
+        st.markdown("""
+        <div style="
+            background: linear-gradient(135deg, #e6f4ff 0%, #f0f7ff 100%);
+            border-left: 4px solid #4096ff;
+            border-radius: 0 8px 8px 0;
+            padding: 10px 14px;
+            margin-bottom: 4px;
+        ">
+            <span style="font-size:16px; font-weight:700; color:#003eb3;">⚙️ 计算选项</span>
+            <span style="font-size:12px; color:#8c8c8c; margin-left:8px;">（选配后点击下方按钮）</span>
+        </div>
+        """, unsafe_allow_html=True)
+
+        if seasonal_on and "一级分类" in st.session_state.df_raw.columns:
+            _cats_all = sorted(
+                st.session_state.df_raw["一级分类"].dropna().astype(str).unique().tolist()
+            )
+            _cats_all = [c for c in _cats_all if c.strip()]
+            _default_cats = [c for c in _cats_all if c.strip() in ("庭院、草坪与花园", "庭院")]
+            st.markdown("**🌿 季节适用品类**")
+            st.caption("勾选需要季节性增强的品类（如庭院类），不勾选则不应用季节因子")
+            seasonal_cats = st.multiselect(
+                "选择品类",
+                options=_cats_all,
+                default=_default_cats,
+                key="seasonal_cats_main",
+                label_visibility="collapsed",
+            )
+        else:
+            seasonal_cats = []
+
+        st.markdown("---")
+        st.markdown("**📦 减仓优化**")
+        st.caption("月均<3单且占比<5%的仓点按比例均分到其他仓")
+        reduction_on = st.checkbox("启用减仓优化", value=False)
+
+    if st.button("🚀 开始计算", type="primary", use_container_width=True):
         with st.spinner("计算中..."):
             try:
                 engine = AllocationEngine()
