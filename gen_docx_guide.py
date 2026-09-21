@@ -12,7 +12,8 @@ BASE = r"c:\Users\Administrator\AppData\Roaming\TRAE SOLO CN\ModularData\ai-agen
 OUTPUT = os.path.join(BASE, "\u5206\u4ed3\u5360\u6bd4\u8ba1\u7b97\u5f15\u64ce_\u4f7f\u7528\u8bf4\u660e.docx")
 
 
-def add_toc(doc):
+def add_toc(doc, guide_md):
+    """从 guide.md 解析标题，生成静态目录（无需右键更新）。"""
     p = doc.add_paragraph()
     run = p.add_run("\u76ee\u5f55")
     run.bold = True
@@ -20,24 +21,22 @@ def add_toc(doc):
     run.font.color.rgb = RGBColor(0x1a, 0x5c, 0xb0)
     p.alignment = WD_ALIGN_PARAGRAPH.CENTER
 
-    p2 = doc.add_paragraph()
-    run2 = p2.add_run()
-    fldChar1 = OxmlElement('w:fldChar')
-    fldChar1.set(qn('w:fldCharType'), 'begin')
-    instrText = OxmlElement('w:instrText')
-    instrText.set(qn('xml:space'), 'preserve')
-    instrText.text = 'TOC \\o "1-2" \\h \\z \\u'
-    fldChar2 = OxmlElement('w:fldChar')
-    fldChar2.set(qn('w:fldCharType'), 'separate')
-    fldText = OxmlElement('w:t')
-    fldText.text = "\u53f3\u952e\u66f4\u65b0\u57df\u4ee5\u751f\u6210\u76ee\u5f55"
-    fldChar3 = OxmlElement('w:fldChar')
-    fldChar3.set(qn('w:fldCharType'), 'end')
-    run2._r.append(fldChar1)
-    run2._r.append(instrText)
-    run2._r.append(fldChar2)
-    run2._r.append(fldText)
-    run2._r.append(fldChar3)
+    for line in guide_md.split('\n'):
+        line = line.rstrip()
+        if line.startswith('## ') and not line.startswith('### '):
+            text = line[3:].strip()
+            p = doc.add_paragraph()
+            p.paragraph_format.left_indent = Cm(0)
+            r = p.add_run(text)
+            r.font.size = Pt(11)
+            r.bold = True
+        elif line.startswith('### '):
+            text = line[4:].strip()
+            p = doc.add_paragraph()
+            p.paragraph_format.left_indent = Cm(1)
+            r = p.add_run(text)
+            r.font.size = Pt(10)
+            r.font.color.rgb = RGBColor(0x55, 0x55, 0x55)
 
 
 def add_page_number_footer(section):
@@ -204,7 +203,7 @@ def gen():
     doc.add_page_break()
 
     # TOC
-    add_toc(doc)
+    add_toc(doc, guide_md)
     doc.add_page_break()
 
     # Parse GUIDE_MD markdown and convert to Word
