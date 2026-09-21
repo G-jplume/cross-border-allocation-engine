@@ -561,24 +561,27 @@ else:
 
         if "一级分类" in st.session_state.df_raw.columns:
             with st.expander("🌿 季节适用品类", expanded=True):
-                cat_shift_thresh = st.slider(
-                    "品类层偏移阈值%", 5, 40, 15, 1,
-                    format="%d%%",
-                    help="品类层偏移量≥此值→默认勾选强季节；SKU数据不足时也用此阈值"
-                )
-                cat_shift_f = cat_shift_thresh / 100.0
-                _cats_all, _ = get_seasonal_defaults(st.session_state.df_raw)
-                _default_cats = compute_seasonal_shifts_preview(
-                    st.session_state.df_raw, target_start_seq, target_end_seq, cat_shift_f
-                )
-                st.caption("默认根据分仓偏移量自动推荐强季节品类（偏移≥品类层阈值），可手动增减")
-                seasonal_cats = st.multiselect(
-                    "选择品类",
-                    options=_cats_all,
-                    default=_default_cats if _default_cats else [],
-                    key="seasonal_cats_main",
-                    label_visibility="collapsed",
-                )
+                col_s1, col_s2 = st.columns([1, 2])
+                with col_s1:
+                    cat_shift_thresh = st.slider(
+                        "品类层偏移阈值%", 5, 40, 15, 1,
+                        format="%d%%",
+                        help="品类层偏移量≥此值→默认勾选强季节；SKU数据不足时也用此阈值"
+                    )
+                with col_s2:
+                    cat_shift_f = cat_shift_thresh / 100.0
+                    _cats_all, _ = get_seasonal_defaults(st.session_state.df_raw)
+                    _default_cats = compute_seasonal_shifts_preview(
+                        st.session_state.df_raw, target_start_seq, target_end_seq, cat_shift_f
+                    )
+                    st.caption("偏移≥阈值→自动勾选，可手动增减")
+                    seasonal_cats = st.multiselect(
+                        "选择品类",
+                        options=_cats_all,
+                        default=_default_cats if _default_cats else [],
+                        key="seasonal_cats_main",
+                        label_visibility="collapsed",
+                    )
         else:
             seasonal_cats = []
             cat_shift_f = 0.15
