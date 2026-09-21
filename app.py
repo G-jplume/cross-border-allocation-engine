@@ -537,6 +537,24 @@ else:
             seasonal_cats = []
 
         st.markdown("---")
+        st.markdown("**🔍 SKU级集中度自动检测**")
+        st.caption("系统自动算每个SKU在目标期同月的出单量占全年的比例。集中度高→自动按强季节处理，低→自动按弱季节处理，中间→跟随品类设置")
+        col_c1, col_c2 = st.columns(2)
+        with col_c1:
+            conc_high = st.slider(
+                "高集中度阈值（≥此值→强季节）", 0.50, 1.00, 0.80, 0.05,
+                format="%.0%%",
+                help="SKU在目标期同月的出单量占全年比例≥此值时，自动判定为强季节，即使品类未勾选"
+            )
+        with col_c2:
+            conc_low = st.slider(
+                "低集中度阈值（≤此值→弱季节）", 0.00, 0.50, 0.20, 0.05,
+                format="%.0%%",
+                help="SKU在目标期同月的出单量占全年比例≤此值时，自动判定为弱季节，即使品类已勾选"
+            )
+        st.caption(f"集中度≥{conc_high:.0%}→自动强季节 | 集中度≤{conc_low:.0%}→自动弱季节 | 中间→跟随品类勾选")
+
+        st.markdown("---")
         st.markdown("**📦 减仓优化**")
         col_r1, col_r2 = st.columns(2)
         with col_r1:
@@ -574,6 +592,8 @@ else:
             engine.new_product_threshold = new_product_threshold
             engine.k_cat = float(k_cat)
             engine.seasonal_categories = seasonal_cats
+            engine.concentration_threshold_high = float(conc_high)
+            engine.concentration_threshold_low = float(conc_low)
 
             with st.status("计算中...", expanded=True) as status:
                 engine.df_raw["在目标期"] = engine.df_raw.apply(
@@ -627,6 +647,7 @@ else:
                     "new_product_threshold": new_product_threshold,
                     "new_product_min_orders": new_product_min_orders,
                     "k_cat": k_cat, "seasonal_cats": seasonal_cats,
+                    "conc_high": conc_high, "conc_low": conc_low,
                     "reduction_on": reduction_on,
                     "reduction_monthly": reduction_monthly_threshold,
                     "reduction_ratio": reduction_ratio_threshold,
@@ -663,6 +684,7 @@ if st.session_state.df_results is not None:
             "new_product_threshold": new_product_threshold,
             "new_product_min_orders": new_product_min_orders,
             "k_cat": k_cat, "seasonal_cats": seasonal_cats,
+            "conc_high": conc_high, "conc_low": conc_low,
             "reduction_on": reduction_on,
             "reduction_monthly": reduction_monthly_threshold,
             "reduction_ratio": reduction_ratio_threshold,
@@ -721,7 +743,7 @@ if st.session_state.df_results is not None:
         df_show = df_show[df_show["一级分类"].isin(cat_filter)]
 
     base_cols = ["SKU", "SPU", "一级分类", "室内外", "历史月数", "目标期月数",
-                 "收缩权重_a", "基准层级", "基准观测数"]
+                 "收缩权重_a", "季节集中度", "季节性来源", "基准层级", "基准观测数"]
     base_cols = [c for c in base_cols if c in df_show.columns]
 
     metric_tabs = st.tabs(["调整后占比", "最终占比", "自身占比", "基准占比", "趋势差", "计算路径"])
@@ -738,6 +760,8 @@ if st.session_state.df_results is not None:
         fmt = {}
         if "收缩权重_a" in tab_cols:
             fmt["收缩权重_a"] = "{:.3f}"
+        if "季节集中度" in tab_cols:
+            fmt["季节集中度"] = "{:.0%}"
         for c in tab_cols:
             if c.startswith("趋势差"):
                 fmt[c] = "{:+.2%}"
