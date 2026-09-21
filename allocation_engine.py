@@ -58,18 +58,18 @@ class AllocationEngine:
 
     # 默认参数（文件不存在时使用）
     DEFAULT_PARAMS = {
-        "anchor": 24325, "lambda": 0.85, "k": 6.0,
+        "anchor": 24325, "lambda": 0.85, "k": 8.0,
         "a_min": 0.0, "a_max": 0.9,
         "target_start": 1, "target_end": 3,
         "alpha_trend": 0.3, "trend_cap": 0.05,
-        "trend_min_orders": 30,
+        "trend_min_orders": 50,
         "recent_start": None, "recent_end": None,
         "far_start": None, "far_end": None,
         "seasonal_categories": "庭院、草坪与花园,庭院",
         "lambda_same_month": 0.95,
-        "new_product_min_orders": 10,
+        "new_product_min_orders": 20,
         "k_cat": 12.0,
-        "concentration_threshold_high": 0.80,
+        "concentration_threshold_high": 0.70,
         "concentration_threshold_low": 0.20,
     }
 
@@ -601,7 +601,7 @@ class AllocationEngine:
                 # 单量门槛：去年+前年同期总单量 < 门槛 → 跳过趋势
                 # 同时确保近期和远期各有数据，避免除零
                 if trend_total >= trend_min_orders and rec_total > 0 and far_total > 0:
-                    # 动态α：>100单用原始α，30-100单用α/2，<30单不生效
+                    # 动态α：>100单用原始α，门槛-100单用α/2，<门槛不生效
                     if trend_total >= 100:
                         trend_alpha = alpha
                     else:
