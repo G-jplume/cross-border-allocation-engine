@@ -2,14 +2,12 @@
 分仓占比计算引擎 - 分仓占比计算核心
 纯Python实现计算链路，与v6 Excel结果对比验证。
 
-计算链路（7步）:
+计算链路（5步）:
 1. 运算SKU映射       (VLOOKUP + TEXTBEFORE fallback)
-2. 时间衰减加权       (w = λ^|anchor - month_seq|)
-3. 季节匹配因子       (V = β if 同季节+适用品类, else 1)
-4. 自身占比           (SUMIFS by 运算SKU / SUMIFS total)
-5. 基准占比           (SPU → 一级分类 → 室内外 → 全公司 回退 + 品类层贝叶斯收缩)
-6. 最终占比           (a×自身 + (1-a)×基准) + 趋势调整(α, 上限cap) + 归一化
-7. 落货量             (占比×需求量, 最大余额法保证整数合计精确)
+2. 时间衰减加权       (w = λ^|anchor - month_seq|, 含月份相似度)
+3. 自身占比           (含季节品类分支, SUMIFS by 运算SKU / SUMIFS total)
+4. 基准占比           (SPU → 一级分类 → 室内外 → 全公司 回退 + 品类层贝叶斯收缩)
+5. 最终占比           (a×自身 + (1-a)×基准) + 趋势调整(α, 上限cap) + 归一化 + 落货量
 
 参数生效层级说明:
 ┌────────────────────┬──────────────┬──────────────────────────────┐
@@ -58,18 +56,15 @@ class AllocationEngine:
     DEFAULT_PARAMS = {
         "anchor": 24325, "lambda": 0.85, "k": 6.0,
         "a_min": 0.0, "a_max": 0.9,
-        "target_type": 1, "target_start": 1, "target_end": 3,
+        "target_start": 1, "target_end": 3,
         "alpha_trend": 0.3, "trend_cap": 0.05,
+        "trend_min_orders": 30,
         "recent_start": None, "recent_end": None,
         "far_start": None, "far_end": None,
-        "seasonal_switch": 1, "seasonal_window": 1,
-        "seasonal_beta": 3.0,
-        "seasonal_beta_weak": 1.5,
         "seasonal_categories": "庭院、草坪与花园,庭院",
         "lambda_same_month": 0.95,
         "new_product_min_orders": 10,
         "k_cat": 12.0,
-        "norm_method": "proportional",
     }
 
     def _load_params(self):
@@ -250,11 +245,9 @@ class AllocationEngine:
         # 判断是否为强季节品类
         is_seasonal_cat = df["一级分类"].isin(cats) if "一级分类" in df.columns else pd.Series(False, index=df.index)
 
-        # 时间衰减 × 月份相似度
-        # 强季节品类 + 同月 → λ_same^dist × 1.0
-        # 强季节品类 + 非同月 → λ^dist × month_sim（层级回退时启用）
-        # 弱季节品类 + 同月 → λ_same^dist × 1.0
-        # 弱季节品类 + 非同月 → λ^dist × month_sim
+        # 时间衰减 × 月份相似度（所有品类统一公式，品类分支在 step4 实现）
+        # 同月 → λ_same^dist × 1.0
+        # 非同月 → λ^dist × month_sim
         time_decay = np.where(
             is_same_month,
             lambda_same ** dist.clip(lower=0),
@@ -277,7 +270,7 @@ class AllocationEngine:
         return df
 
     # =========================================================
-    # Step 3: 自身占比（原Step4，季节匹配因子已删除）
+    # Step 3: 自身占比（含季节品类分支）
     # =========================================================
     def _add_weighted_cols(self):
         """加权列 = 衰减权重 × 原始量。"""
@@ -288,58 +281,80 @@ class AllocationEngine:
         self.df_raw = df
         return df
 
-    def step4_self_ratio(self):
+    def step3_self_ratio(self):
         df = self._add_weighted_cols()
         target_months = self._get_target_months()
+        cats = self._get_seasonal_categories()
 
         is_same_month = df["月"].apply(lambda m: int(m) in target_months)
         same_month_df = df[is_same_month].copy()
-        all_grouped = df.groupby("运算SKU_py")
+        all_grouped = dict(tuple(df.groupby("运算SKU_py")))
+        same_groups = dict(tuple(same_month_df.groupby("运算SKU_py")))
 
         sku_weighted = {}
-        n_same_month = 0
-        n_fallback = 0
+        n_strong_same = 0
+        n_strong_fallback = 0
+        n_weak_all = 0
 
-        for sku, all_rows in all_grouped:
-            same_rows = same_month_df[same_month_df["运算SKU_py"] == sku]
+        for sku, all_rows in all_grouped.items():
+            same_rows = same_groups.get(sku, pd.DataFrame())
             same_total = same_rows["加权合计_py"].sum() if len(same_rows) > 0 else 0
 
-            if same_total > 0:
-                group = same_rows
-                n_same_month += 1
-                used_months = len(same_rows[same_rows[WAREHOUSES].sum(axis=1) > 0])
+            is_seasonal = False
+            if "一级分类" in all_rows.columns and len(all_rows) > 0:
+                cat_val = str(all_rows.iloc[0]["一级分类"]).strip()
+                is_seasonal = cat_val in cats
+
+            if is_seasonal:
+                if same_total > 0:
+                    group = same_rows
+                    n_strong_same += 1
+                    used_months = len(same_rows[same_rows[WAREHOUSES].sum(axis=1) > 0])
+                else:
+                    fallback_total = all_rows["加权合计_py"].sum()
+                    if fallback_total > 0:
+                        group = all_rows
+                        n_strong_fallback += 1
+                        used_months = len(all_rows[all_rows[WAREHOUSES].sum(axis=1) > 0])
+                    else:
+                        continue
             else:
                 fallback_total = all_rows["加权合计_py"].sum()
                 if fallback_total > 0:
                     group = all_rows
-                    n_fallback += 1
+                    n_weak_all += 1
                     used_months = len(all_rows[all_rows[WAREHOUSES].sum(axis=1) > 0])
                 else:
                     continue
 
             total = group["加权合计_py"].sum()
             wh_sums = {wh: group[f"加权_{wh}_py"].sum() for wh in WAREHOUSES}
+            raw_total = int(group[WAREHOUSES].sum(axis=1).sum())
             sku_weighted[sku] = {
                 "total": total,
+                "raw_total": raw_total,
                 "wh_sums": wh_sums,
                 "self_ratios": {wh: wh_sums[wh] / total for wh in WAREHOUSES},
                 "used_months": used_months,
+                "is_seasonal": is_seasonal,
             }
 
         for sku in sku_weighted:
-            all_rows = df[df["运算SKU_py"] == sku]
+            all_rows = all_grouped[sku]
             sku_weighted[sku]["history_months"] = len(all_rows[all_rows[WAREHOUSES].sum(axis=1) > 0])
-            same_rows = same_month_df[same_month_df["运算SKU_py"] == sku]
-            sku_weighted[sku]["target_months"] = len(same_rows[same_rows[WAREHOUSES].sum(axis=1) > 0])
+            same_rows = same_groups.get(sku, pd.DataFrame())
+            sku_weighted[sku]["target_months"] = len(same_rows[same_rows[WAREHOUSES].sum(axis=1) > 0]) if len(same_rows) > 0 else 0
 
         print(f"  Step4: {len(sku_weighted)} SKUs "
-              f"(same-month: {n_same_month}, fallback: {n_fallback}, "
+              f"(strong-seasonal same-month: {n_strong_same}, "
+              f"strong-seasonal fallback: {n_strong_fallback}, "
+              f"weak-seasonal all-months: {n_weak_all}, "
               f"target months: {target_months})")
         self.sku_weighted = sku_weighted
         return sku_weighted
 
     # =========================================================
-    # Step 5: 基准占比（含品类层贝叶斯收缩）
+    # Step 4: 基准占比（含品类层贝叶斯收缩）
     # =========================================================
     def _shrink(self, child_ratios, child_n, parent_ratios, k_cat):
         """贝叶斯收缩：child_n/(child_n+k)×子层 + k/(child_n+k)×父层。
@@ -353,7 +368,7 @@ class AllocationEngine:
         return {wh: w * child_ratios.get(wh, 0.0) + (1 - w) * parent_ratios.get(wh, 0.0)
                 for wh in WAREHOUSES}
 
-    def step5_benchmark(self):
+    def step4_benchmark(self):
         k_cat = float(self.k_cat)
         spu_bm = {bm["label"]: bm for bm in self.benchmarks.get("SPU", [])}
         cat_bm = {bm["label"]: bm for bm in self.benchmarks.get("一级分类", [])}
@@ -365,11 +380,12 @@ class AllocationEngine:
                           if overall_total > 0 else {wh: 0.25 for wh in WAREHOUSES})
 
         df = self.df_raw
+        df_by_sku = dict(tuple(df.groupby("运算SKU_py")))
         sku_info = {}
         for sku in self.sku_weighted:
-            rows = df[df["运算SKU_py"] == sku]
-            if len(rows) == 0:
+            if sku not in df_by_sku:
                 continue
+            rows = df_by_sku[sku]
             sku_info[sku] = {
                 "SPU": rows["SPU"].iloc[0],
                 "一级分类": rows["一级分类"].iloc[0],
@@ -411,13 +427,13 @@ class AllocationEngine:
                 "基准": self._shrink(o["观测占比"], o["观测数"], overall_ratios, k_cat),
             }
         # SPU 基准 = shrink(SPU观测, n, 所属一级分类收缩后基准)
+        spu_to_cat = {}
+        for label, group in all_target.groupby("SPU"):
+            if len(group) > 0:
+                spu_to_cat[label] = group["一级分类"].iloc[0]
         spu_shrunk = {}
         for label, o in spu_obs.items():
-            # 找到该 SPU 所属一级分类
-            pc = None
-            sub = all_target[all_target["SPU"] == label]
-            if len(sub) > 0:
-                pc = sub["一级分类"].iloc[0]
+            pc = spu_to_cat.get(label)
             parent = cat_shrunk.get(pc, {}).get("基准", overall_ratios) if pc else overall_ratios
             spu_shrunk[label] = {
                 "观测数": o["观测数"],
@@ -483,11 +499,11 @@ class AllocationEngine:
         return sku_benchmarks
 
     # =========================================================
-    # Step 6: 趋势调整 + 最终占比
+    # Step 5: 趋势调整 + 最终占比
     # 优化：建议4 - 趋势因子改用原始单量占比（不加衰减权重和季节因子）
     # 优化：建议5 - 新品增加订单量门槛（history≤阈值 或 目标期总单量<门槛）
     # =========================================================
-    def step6_final_ratio(self, demand_qty=1, apply_trend=True):
+    def step5_final_ratio(self, demand_qty=1, apply_trend=True):
         k = self.params["k"]
         a_min = self.params["a_min"]
         a_max = self.params["a_max"]
@@ -521,9 +537,9 @@ class AllocationEngine:
 
             n = sw.get("used_months", sw["target_months"])
             history = sw["history_months"]
-            target_orders = int(sw.get("total", 0))
+            target_orders = int(sw.get("raw_total", sw.get("total", 0)))
 
-            # 建议5：新品判定 = 历史月数≤阈值 OR 目标期总单量<门槛
+            # 新品判定 = 历史月数≤阈值 OR 目标期原始总单量<门槛
             is_new = (history <= new_threshold) or (target_orders < min_orders)
 
             if is_new:
@@ -553,7 +569,8 @@ class AllocationEngine:
                 far_total = far[WAREHOUSES].sum(axis=1).sum() if len(far) else 0
                 trend_total = rec_total + far_total
                 # 单量门槛：去年+前年同期总单量 < 门槛 → 跳过趋势
-                if trend_total >= trend_min_orders:
+                # 同时确保近期和远期各有数据，避免除零
+                if trend_total >= trend_min_orders and rec_total > 0 and far_total > 0:
                     # 动态α：>100单用原始α，30-100单用α/2，<30单不生效
                     if trend_total >= 100:
                         trend_alpha = alpha
@@ -565,10 +582,9 @@ class AllocationEngine:
                         d = rr - fr
                         trend_diff[wh] = d
                         adjusted[wh] = final[wh] + trend_alpha * max(-cap, min(cap, d))
-                    if self.params.get("norm_method", "proportional") != "raw":
-                        adj_total = sum(adjusted.values())
-                        if adj_total > 0:
-                            adjusted = {wh: v / adj_total for wh, v in adjusted.items()}
+                    adj_total = sum(adjusted.values())
+                    if adj_total > 0:
+                        adjusted = {wh: v / adj_total for wh, v in adjusted.items()}
 
             # --- 落货量：最大余额法，整数合计精确等于需求量 ---
             allocation = self._allocate_integer(adjusted, demand_qty)
@@ -644,7 +660,7 @@ class AllocationEngine:
         覆盖三个易错点：
         1. 四仓占比合计是否恒为 100%
         2. 趋势因子 α 是否真正生效
-        3. 季节因子是否命中了任何行（品类名不匹配会静默失效）
+        3. 季节品类分支是否生效（强季节用同月、弱季节用全部）
         """
         checks = []
 
@@ -658,12 +674,12 @@ class AllocationEngine:
                     checks.append((f"{label}四仓合计=100%", ok,
                                    f"最大偏差 {dev:.2e}"))
 
-        if self.df_raw is not None and "季节因子_py" in self.df_raw.columns:
-            n = int((self.df_raw["季节因子_py"] > 1).sum())
+        if self.sku_weighted:
+            n_strong = sum(1 for sw in self.sku_weighted.values() if sw.get("is_seasonal"))
+            n_weak = len(self.sku_weighted) - n_strong
             cats = self._get_seasonal_categories()
-            checks.append(("季节因子命中行数", n > 0,
-                           f"命中 {n} 行（适用品类: {cats}）" if n > 0
-                           else f"0 行命中！适用品类 {cats} 与数据的『一级分类』不匹配，季节因子实际未生效"))
+            checks.append(("季节品类分支生效", n_strong > 0 or n_weak > 0,
+                           f"强季节SKU: {n_strong} 个（只用同月）, 弱季节SKU: {n_weak} 个（用全部月份加权）, 适用品类: {cats}"))
 
         alpha = float(self.params.get("alpha_trend", 0) or 0)
         if df_results is not None and len(df_results) and "趋势差_美西" in df_results.columns:
@@ -749,17 +765,14 @@ def main():
     print("\n--- Step 2: 时间衰减加权 ---")
     engine.step2_decay_weight()
 
-    print("\n--- Step 3: 季节因子 ---")
-    engine.step3_seasonal_factor()
+    print("\n--- Step 3: 自身占比 ---")
+    engine.step3_self_ratio()
 
-    print("\n--- Step 4: 自身占比 ---")
-    engine.step4_self_ratio()
+    print("\n--- Step 4: 基准占比 ---")
+    engine.step4_benchmark()
 
-    print("\n--- Step 5: 基准占比 ---")
-    engine.step5_benchmark()
-
-    print("\n--- Step 6: 最终占比 ---")
-    df_results = engine.step6_final_ratio()
+    print("\n--- Step 5: 最终占比 ---")
+    df_results = engine.step5_final_ratio()
 
     print("\n--- 自检 ---")
     for name, ok, msg in engine.self_check(df_results):
