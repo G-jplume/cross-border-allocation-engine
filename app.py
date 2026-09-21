@@ -570,10 +570,6 @@ else:
                         help="品类层偏移量≥此值→默认勾选强季节；SKU数据不足时也用此阈值",
                         key="cat_shift_slider"
                     )
-                    if st.session_state.get("prev_cat_shift") != cat_shift_thresh:
-                        st.session_state["prev_cat_shift"] = cat_shift_thresh
-                        st.session_state.pop("seasonal_cats_main", None)
-                        st.rerun()
                 with col_s2:
                     cat_shift_f = cat_shift_thresh / 100.0
                     _cats_all, _ = get_seasonal_defaults(st.session_state.df_raw)
@@ -590,7 +586,7 @@ else:
                         "选择品类",
                         options=_cats_all,
                         default=_default_cats if _default_cats else [],
-                        key="seasonal_cats_main",
+                        key=f"seasonal_cats_main_{cat_shift_thresh}",
                         label_visibility="collapsed",
                     )
         else:
