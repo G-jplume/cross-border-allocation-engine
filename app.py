@@ -1104,7 +1104,8 @@ if st.session_state.df_results is not None:
         for lv in ["一级分类", "室内外", "SPU", "全公司"]:
             if lv in agg_results:
                 _t = agg_results[lv].copy()
-                _t.insert(0, "层级", lv)
+                if "层级" not in _t.columns:
+                    _t.insert(0, "层级", lv)
                 _all_agg_dfs.append(_t)
         if _all_agg_dfs:
             _all_agg = pd.concat(_all_agg_dfs, ignore_index=True)
