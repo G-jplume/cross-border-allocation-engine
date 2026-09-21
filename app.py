@@ -52,17 +52,17 @@ def get_seasonal_defaults(df):
     return cats_all, []
 
 
-def compute_seasonal_shifts_preview(df, target_start_seq, target_end_seq, cat_shift_threshold=0.15):
-    """预算品类级分仓偏移量，返回推荐的强季节品类列表。"""
+def compute_seasonal_shifts_preview(df, target_months_set, cat_shift_threshold=0.15):
+    """预算品类级分仓偏移量，返回推荐的强季节品类列表。
+
+    target_months_set: 目标期月份编号集合（如 {1, 2, 3}），用月份而非年月序列匹配历史数据。
+    """
     if df is None or "一级分类" not in df.columns:
         return []
     df_tmp = df.copy()
-    df_tmp["在目标期"] = df_tmp.apply(
-        lambda row: 1 if target_start_seq <= int(row["年"]) * 12 + int(row["月"]) <= target_end_seq else 0,
-        axis=1
-    )
-    in_target = df_tmp[df_tmp["在目标期"] == 1]
-    out_target = df_tmp[df_tmp["在目标期"] == 0]
+    df_tmp["在目标期"] = df_tmp["月"].apply(lambda m: int(m) in target_months_set)
+    in_target = df_tmp[df_tmp["在目标期"]]
+    out_target = df_tmp[~df_tmp["在目标期"]]
     whs = WAREHOUSES
 
     def calc_ratios(group):
@@ -576,7 +576,7 @@ else:
                     cat_shift_f = cat_shift_thresh / 100.0
                     _cats_all, _ = get_seasonal_defaults(st.session_state.df_raw)
                     _default_cats = compute_seasonal_shifts_preview(
-                        st.session_state.df_raw, target_start_seq, target_end_seq, cat_shift_f
+                        st.session_state.df_raw, target_months_set, cat_shift_f
                     )
                     st.caption("偏移≥阈值→自动勾选，可手动增减")
                     seasonal_cats = st.multiselect(
