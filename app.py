@@ -6,7 +6,7 @@
 
 页面结构:
   侧边栏  参数面板（分组 + 生效状态标注 + 自检）
-  主区域  1.上传数据 → 2.计算参数确认 → 3.结果 → 4.占比微调 → 5.导出
+  主区域  1.上传数据 → 2.开始计算 → 3.结果 → 4.占比微调 → 5.可视化 → 6.导出
 """
 import streamlit as st
 import pandas as pd
@@ -880,7 +880,7 @@ if st.session_state.df_results is not None:
                         new_vals[wh] = st.slider(
                             f"{wh}", min_value=0.0, max_value=1.0,
                             value=round(base[wh], 4), step=0.01,
-                            format="%.2f%%", key=f"tune_{adj_sku}_{wh}",
+                            format="%.0f%%", key=f"tune_{adj_sku}_{wh}",
                         )
                     tot_new = sum(new_vals.values())
                     if abs(tot_new - 1.0) < 1e-9:
