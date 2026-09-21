@@ -308,7 +308,7 @@ with st.sidebar.expander("趋势因子 α", expanded=False):
         help="单仓趋势调整幅度上限，防异常月份带偏。"
     )
     trend_min_orders = st.slider(
-        "趋势单量门槛", 10, 100, 30, 5,
+        "趋势单量门槛", 10, 100, 50, 5,
         help="去年+前年同期总单量低于此值则跳过趋势调整，避免噪声。"
     )
     if alpha_trend == 0:
@@ -343,7 +343,7 @@ with st.sidebar.expander("新品与基准", expanded=False):
         help="历史出单月数≤此值视为新品，完全用基准占比。"
     )
     new_product_min_orders = st.slider(
-        "新品订单量门槛", 1, 100, 10,
+        "新品订单量门槛", 1, 100, 20,
         help="目标期总单量<此值也视为新品，避免低单量偶然性。"
     )
     st.caption(
@@ -351,7 +351,7 @@ with st.sidebar.expander("新品与基准", expanded=False):
     )
 
     k_val = st.slider(
-        "收缩强度 k", 1, 20, 6,
+        "收缩强度 k", 1, 20, 8,
         help="自身权重=n/(n+k)，n=目标期月数。k越大越信基准，越小越信自身。"
     )
     _est_n = target_end_seq - target_start_seq + 1
@@ -542,7 +542,7 @@ else:
         col_c1, col_c2 = st.columns(2)
         with col_c1:
             conc_high = st.slider(
-                "高集中度阈值（≥此值→强季节）%", 50, 100, 80, 5,
+                "高集中度阈值（≥此值→强季节）%", 50, 100, 70, 5,
                 format="%d%%",
                 help="SKU在目标期同月的出单量占全年比例≥此值时，自动判定为强季节，即使品类未勾选"
             )
