@@ -44,13 +44,51 @@ with open(_guide_path, encoding="utf-8") as _gf:
 
 
 def get_seasonal_defaults(df):
-    """从数据中提取品类列表和默认强季节品类。"""
+    """从数据中提取品类列表，默认强季节品类留空（引擎计算偏移量后注入）。"""
     if df is None or "一级分类" not in df.columns:
         return [], []
     cats_all = sorted(df["一级分类"].dropna().astype(str).unique().tolist())
     cats_all = [c for c in cats_all if c.strip()]
-    default_cats = [c for c in cats_all if c.strip() in ("庭院、草坪与花园", "庭院")]
-    return cats_all, default_cats
+    return cats_all, []
+
+
+def compute_seasonal_shifts_preview(df, target_start_seq, target_end_seq, cat_shift_threshold=0.15):
+    """预算品类级分仓偏移量，返回推荐的强季节品类列表。"""
+    if df is None or "一级分类" not in df.columns:
+        return []
+    df_tmp = df.copy()
+    df_tmp["在目标期"] = df_tmp.apply(
+        lambda row: 1 if target_start_seq <= int(row["年"]) * 12 + int(row["月"]) <= target_end_seq else 0,
+        axis=1
+    )
+    in_target = df_tmp[df_tmp["在目标期"] == 1]
+    out_target = df_tmp[df_tmp["在目标期"] == 0]
+    whs = WAREHOUSES
+
+    def calc_ratios(group):
+        wh_sums = {wh: group[wh].sum() for wh in whs}
+        total = sum(wh_sums.values())
+        if total == 0:
+            return None
+        return {wh: wh_sums[wh] / total for wh in whs}
+
+    def calc_shift(a, b):
+        if a is None or b is None:
+            return 0.0
+        return sum(abs(a.get(wh, 0) - b.get(wh, 0)) for wh in whs)
+
+    cats_in = {}
+    cats_out = {}
+    for label, group in in_target.groupby("一级分类"):
+        cats_in[label] = calc_ratios(group)
+    for label, group in out_target.groupby("一级分类"):
+        cats_out[label] = calc_ratios(group)
+
+    shifts = {}
+    for label in set(list(cats_in.keys()) + list(cats_out.keys())):
+        shifts[label] = calc_shift(cats_in.get(label), cats_out.get(label))
+
+    return [c for c, s in sorted(shifts.items(), key=lambda x: -x[1]) if s >= cat_shift_threshold]
 
 
 def read_csv_auto(path):
@@ -523,38 +561,48 @@ else:
         st.caption("选配后点击下方按钮")
 
         if "一级分类" in st.session_state.df_raw.columns:
-            _cats_all, _default_cats = get_seasonal_defaults(st.session_state.df_raw)
+            cat_shift_thresh = st.slider(
+                "品类层偏移阈值%", 5, 40, 15, 1,
+                format="%d%%",
+                help="品类层偏移量≥此值→默认勾选强季节；SKU数据不足时也用此阈值"
+            )
+            cat_shift_f = cat_shift_thresh / 100.0
+            _cats_all, _ = get_seasonal_defaults(st.session_state.df_raw)
+            _default_cats = compute_seasonal_shifts_preview(
+                st.session_state.df_raw, target_start_seq, target_end_seq, cat_shift_f
+            )
             st.markdown("**🌿 季节适用品类**")
-            st.caption("勾选强季节品类（如庭院类），只用目标期同月数据；未勾选的品类放开全部月份加权")
+            st.caption("默认根据分仓偏移量自动推荐强季节品类（偏移≥品类层阈值），可手动增减。勾选的品类只用目标期同月数据")
             seasonal_cats = st.multiselect(
                 "选择品类",
                 options=_cats_all,
-                default=_default_cats,
+                default=_default_cats if _default_cats else [],
                 key="seasonal_cats_main",
                 label_visibility="collapsed",
             )
         else:
             seasonal_cats = []
+            cat_shift_f = 0.15
 
         st.markdown("---")
-        st.markdown("**🔍 SKU级集中度自动检测**")
-        st.caption("系统自动算每个SKU在目标期同月的出单量占全年的比例。集中度高→自动按强季节处理，低→自动按弱季节处理，中间→跟随品类设置")
+        st.markdown("**🔍 SKU级分仓偏移自动检测**")
+        st.caption("系统自动算每个SKU目标期vs非目标期的四仓占比差异。偏移大→分仓随季节变化→强季节，偏移小→分仓稳定→弱季节。数据不足时回退到SPU→品类层")
         col_c1, col_c2 = st.columns(2)
         with col_c1:
-            conc_high = st.slider(
-                "高集中度阈值（≥此值→强季节）%", 50, 100, 70, 5,
+            shift_high = st.slider(
+                "强季节偏移阈值（≥此值）%", 5, 50, 20, 1,
                 format="%d%%",
-                help="SKU在目标期同月的出单量占全年比例≥此值时，自动判定为强季节，即使品类未勾选"
+                help="SKU/SPU层偏移量≥此值→强季节（需目标期和非目标期各≥50单）"
             )
         with col_c2:
-            conc_low = st.slider(
-                "低集中度阈值（≤此值→弱季节）%", 0, 50, 20, 5,
+            shift_low = st.slider(
+                "弱季节偏移阈值（≤此值）%", 1, 30, 10, 1,
                 format="%d%%",
-                help="SKU在目标期同月的出单量占全年比例≤此值时，自动判定为弱季节，即使品类已勾选"
+                help="SKU/SPU层偏移量≤此值→弱季节（需目标期和非目标期各≥50单）"
             )
-        conc_high_f = conc_high / 100.0
-        conc_low_f = conc_low / 100.0
-        st.caption(f"集中度≥{conc_high}%→自动强季节 | 集中度≤{conc_low}%→自动弱季节 | 中间→跟随品类勾选")
+        shift_high_f = shift_high / 100.0
+        shift_low_f = shift_low / 100.0
+        st.caption(f"SKU/SPU层：偏移≥{shift_high}%→强 | ≤{shift_low}%→弱 | 中间→回退品类层 | 品类层：≥{cat_shift_thresh}%→强")
 
         st.markdown("---")
         st.markdown("**📦 减仓优化**")
@@ -595,8 +643,9 @@ else:
             engine.new_product_threshold = new_product_threshold
             engine.k_cat = float(k_cat)
             engine.seasonal_categories = seasonal_cats
-            engine.concentration_threshold_high = float(conc_high_f)
-            engine.concentration_threshold_low = float(conc_low_f)
+            engine.shift_threshold_high = float(shift_high_f)
+            engine.shift_threshold_low = float(shift_low_f)
+            engine.cat_shift_threshold = float(cat_shift_f)
 
             with st.status("计算中...", expanded=True) as status:
                 engine.df_raw["在目标期"] = engine.df_raw.apply(
@@ -650,7 +699,8 @@ else:
                     "new_product_threshold": new_product_threshold,
                     "new_product_min_orders": new_product_min_orders,
                     "k_cat": k_cat, "seasonal_cats": seasonal_cats,
-                    "conc_high": conc_high_f, "conc_low": conc_low_f,
+                    "shift_high": shift_high_f, "shift_low": shift_low_f,
+                    "cat_shift": cat_shift_f,
                     "reduction_on": reduction_on,
                     "reduction_monthly": reduction_monthly_threshold,
                     "reduction_ratio": reduction_ratio_f,
@@ -746,7 +796,7 @@ if st.session_state.df_results is not None:
         df_show = df_show[df_show["一级分类"].isin(cat_filter)]
 
     base_cols = ["SKU", "SPU", "一级分类", "室内外", "历史月数", "目标期月数",
-                 "收缩权重_a", "季节集中度", "季节性来源", "基准层级", "基准观测数"]
+                 "收缩权重_a", "季节偏移量", "季节性来源", "基准层级", "基准观测数"]
     base_cols = [c for c in base_cols if c in df_show.columns]
 
     metric_tabs = st.tabs(["调整后占比", "最终占比", "自身占比", "基准占比", "趋势差", "计算路径"])
@@ -763,8 +813,8 @@ if st.session_state.df_results is not None:
         fmt = {}
         if "收缩权重_a" in tab_cols:
             fmt["收缩权重_a"] = "{:.3f}"
-        if "季节集中度" in tab_cols:
-            fmt["季节集中度"] = "{:.0%}"
+        if "季节偏移量" in tab_cols:
+            fmt["季节偏移量"] = "{:.0%}"
         for c in tab_cols:
             if c.startswith("趋势差"):
                 fmt[c] = "{:+.2%}"
@@ -793,6 +843,8 @@ if st.session_state.df_results is not None:
                 - 目标期月数：{_row.get('目标期月数', '—')}
                 - 目标期单量：{_row.get('目标期单量', '—')}
                 - 是否新品：{_row.get('是否新品', '—')}
+                - 季节偏移量：{_row.get('季节偏移量', 0):.0%}
+                - 季节性来源：{_row.get('季节性来源', '—')}
                 """)
             with _pc2:
                 path_tab.markdown("**计算参数**")
