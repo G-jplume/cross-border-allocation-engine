@@ -48,6 +48,9 @@ class AllocationEngine:
         self.k_cat = float(self.params.get("k_cat", 12.0))
         # 季节适用品类（None 表示使用 params 里的默认值）
         self.seasonal_categories = None
+        # SKU级集中度自动检测阈值
+        self.concentration_threshold_high = float(self.params.get("concentration_threshold_high", 0.80))
+        self.concentration_threshold_low = float(self.params.get("concentration_threshold_low", 0.20))
         # 趋势窗口（None 表示按 anchor 自动推导）
         self.trend_recent = None
         self.trend_far = None
@@ -65,6 +68,8 @@ class AllocationEngine:
         "lambda_same_month": 0.95,
         "new_product_min_orders": 10,
         "k_cat": 12.0,
+        "concentration_threshold_high": 0.80,
+        "concentration_threshold_low": 0.20,
     }
 
     def _load_params(self):
@@ -291,19 +296,40 @@ class AllocationEngine:
         all_grouped = dict(tuple(df.groupby("运算SKU_py")))
         same_groups = dict(tuple(same_month_df.groupby("运算SKU_py")))
 
+        high_thresh = self.concentration_threshold_high
+        low_thresh = self.concentration_threshold_low
+
         sku_weighted = {}
         n_strong_same = 0
         n_strong_fallback = 0
         n_weak_all = 0
+        n_auto_strong = 0
+        n_auto_weak = 0
 
         for sku, all_rows in all_grouped.items():
             same_rows = same_groups.get(sku, pd.DataFrame())
             same_total = same_rows["加权合计_py"].sum() if len(same_rows) > 0 else 0
 
-            is_seasonal = False
+            same_raw = int(same_rows[WAREHOUSES].sum(axis=1).sum()) if len(same_rows) > 0 else 0
+            all_raw = int(all_rows[WAREHOUSES].sum(axis=1).sum())
+            concentration = same_raw / all_raw if all_raw > 0 else 0.0
+
+            cat_is_seasonal = False
             if "一级分类" in all_rows.columns and len(all_rows) > 0:
                 cat_val = str(all_rows.iloc[0]["一级分类"]).strip()
-                is_seasonal = cat_val in cats
+                cat_is_seasonal = cat_val in cats
+
+            if concentration >= high_thresh:
+                is_seasonal = True
+                seasonality_source = "自动-高集中度"
+                n_auto_strong += 1
+            elif concentration <= low_thresh:
+                is_seasonal = False
+                seasonality_source = "自动-低集中度"
+                n_auto_weak += 1
+            else:
+                is_seasonal = cat_is_seasonal
+                seasonality_source = "品类" if cat_is_seasonal else "弱季节"
 
             if is_seasonal:
                 if same_total > 0:
@@ -337,6 +363,8 @@ class AllocationEngine:
                 "self_ratios": {wh: wh_sums[wh] / total for wh in WAREHOUSES},
                 "used_months": used_months,
                 "is_seasonal": is_seasonal,
+                "concentration": concentration,
+                "seasonality_source": seasonality_source,
             }
 
         for sku in sku_weighted:
@@ -345,10 +373,11 @@ class AllocationEngine:
             same_rows = same_groups.get(sku, pd.DataFrame())
             sku_weighted[sku]["target_months"] = len(same_rows[same_rows[WAREHOUSES].sum(axis=1) > 0]) if len(same_rows) > 0 else 0
 
-        print(f"  Step4: {len(sku_weighted)} SKUs "
+        print(f"  Step3: {len(sku_weighted)} SKUs "
               f"(strong-seasonal same-month: {n_strong_same}, "
               f"strong-seasonal fallback: {n_strong_fallback}, "
               f"weak-seasonal all-months: {n_weak_all}, "
+              f"auto-strong: {n_auto_strong}, auto-weak: {n_auto_weak}, "
               f"target months: {target_months})")
         self.sku_weighted = sku_weighted
         return sku_weighted
@@ -600,6 +629,8 @@ class AllocationEngine:
                 "是否新品": "是" if is_new else "否",
                 "收缩权重_a": a,
                 "趋势alpha": trend_alpha,
+                "季节集中度": sw.get("concentration", 0.0),
+                "季节性来源": sw.get("seasonality_source", ""),
                 "基准层级": sb["level"],
                 "基准观测数": sb.get("benchmark_n", ""),
                 "基准父层": sb.get("benchmark_parent", ""),
@@ -677,9 +708,14 @@ class AllocationEngine:
         if self.sku_weighted:
             n_strong = sum(1 for sw in self.sku_weighted.values() if sw.get("is_seasonal"))
             n_weak = len(self.sku_weighted) - n_strong
+            n_auto_strong = sum(1 for sw in self.sku_weighted.values() if sw.get("seasonality_source") == "自动-高集中度")
+            n_auto_weak = sum(1 for sw in self.sku_weighted.values() if sw.get("seasonality_source") == "自动-低集中度")
+            n_cat = sum(1 for sw in self.sku_weighted.values() if sw.get("seasonality_source") == "品类")
             cats = self._get_seasonal_categories()
-            checks.append(("季节品类分支生效", n_strong > 0 or n_weak > 0,
-                           f"强季节SKU: {n_strong} 个（只用同月）, 弱季节SKU: {n_weak} 个（用全部月份加权）, 适用品类: {cats}"))
+            checks.append(("季节性判定生效", n_strong > 0 or n_weak > 0,
+                           f"强季节SKU: {n_strong} 个（只用同月）, 弱季节SKU: {n_weak} 个（用全部月份加权）\n"
+                           f"  其中：自动高集中度→强: {n_auto_strong}, 自动低集中度→弱: {n_auto_weak}, 品类决定: {n_cat}\n"
+                           f"  集中度阈值: 高≥{self.concentration_threshold_high:.0%}, 低≤{self.concentration_threshold_low:.0%}, 适用品类: {cats}"))
 
         alpha = float(self.params.get("alpha_trend", 0) or 0)
         if df_results is not None and len(df_results) and "趋势差_美西" in df_results.columns:
