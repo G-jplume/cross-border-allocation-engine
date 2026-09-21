@@ -280,8 +280,8 @@ st.sidebar.subheader("时间衰减加权")
 st.sidebar.caption("同月用λ_same，非同月用λ×月份相似度（同月1.0/相邻0.6/隔2月0.3/隔3月+0.1）。")
 
 lambda_val = st.sidebar.slider(
-    "非同月衰减速度 λ", 0.50, 1.00, 0.85, 0.01,
-    help="非同月数据时间衰减率。0.85=每月衰减15%。"
+    "非同月衰减速度 λ", 0.50, 1.00, 0.80, 0.01,
+    help="非同月数据时间衰减率。0.80=每月衰减20%。"
 )
 lambda_same = st.sidebar.slider(
     "同月跨年衰减速度 λ_same", 0.80, 1.00, 0.95, 0.01,
@@ -366,8 +366,8 @@ with st.sidebar.expander("新品与基准", expanded=False):
         a_min = st.slider("权重下限", 0.0, 0.5, 0.0, 0.05,
                           help="自身数据最低权重。0=新品完全用基准。")
     with col_a2:
-        a_max = st.slider("权重上限", 0.5, 1.0, 0.9, 0.05,
-                          help="自身数据最高权重。0.9=最多90%用自身。")
+        a_max = st.slider("权重上限", 0.5, 1.0, 0.85, 0.05,
+                          help="自身数据最高权重。0.85=最多85%用自身。")
 
     k_cat = st.slider(
         "品类层最小等效观测数", 3, 50, 12,
