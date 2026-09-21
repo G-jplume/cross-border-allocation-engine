@@ -542,17 +542,19 @@ else:
         col_c1, col_c2 = st.columns(2)
         with col_c1:
             conc_high = st.slider(
-                "高集中度阈值（≥此值→强季节）", 0.50, 1.00, 0.80, 0.05,
-                format="%.0f%%",
+                "高集中度阈值（≥此值→强季节）%", 50, 100, 80, 5,
+                format="%d%%",
                 help="SKU在目标期同月的出单量占全年比例≥此值时，自动判定为强季节，即使品类未勾选"
             )
         with col_c2:
             conc_low = st.slider(
-                "低集中度阈值（≤此值→弱季节）", 0.00, 0.50, 0.20, 0.05,
-                format="%.0f%%",
+                "低集中度阈值（≤此值→弱季节）%", 0, 50, 20, 5,
+                format="%d%%",
                 help="SKU在目标期同月的出单量占全年比例≤此值时，自动判定为弱季节，即使品类已勾选"
             )
-        st.caption(f"集中度≥{conc_high:.0%}→自动强季节 | 集中度≤{conc_low:.0%}→自动弱季节 | 中间→跟随品类勾选")
+        conc_high_f = conc_high / 100.0
+        conc_low_f = conc_low / 100.0
+        st.caption(f"集中度≥{conc_high}%→自动强季节 | 集中度≤{conc_low}%→自动弱季节 | 中间→跟随品类勾选")
 
         st.markdown("---")
         st.markdown("**📦 减仓优化**")
@@ -564,10 +566,11 @@ else:
             )
         with col_r2:
             reduction_ratio_threshold = st.slider(
-                "占比上限", 0.01, 0.20, 0.05, 0.01, format="%.0%%",
+                "占比上限%", 1, 20, 5, 1, format="%d%%",
                 help="占比低于此值的仓点会被减仓"
             )
-        st.caption(f"月均<{reduction_monthly_threshold}单且占比<{reduction_ratio_threshold:.0%}的仓点按比例均分到其他仓")
+        reduction_ratio_f = reduction_ratio_threshold / 100.0
+        st.caption(f"月均<{reduction_monthly_threshold}单且占比<{reduction_ratio_threshold}%的仓点按比例均分到其他仓")
         reduction_on = st.checkbox("启用减仓优化", value=False)
 
     if st.button("🚀 开始计算", type="primary", use_container_width=True):
@@ -592,8 +595,8 @@ else:
             engine.new_product_threshold = new_product_threshold
             engine.k_cat = float(k_cat)
             engine.seasonal_categories = seasonal_cats
-            engine.concentration_threshold_high = float(conc_high)
-            engine.concentration_threshold_low = float(conc_low)
+            engine.concentration_threshold_high = float(conc_high_f)
+            engine.concentration_threshold_low = float(conc_low_f)
 
             with st.status("计算中...", expanded=True) as status:
                 engine.df_raw["在目标期"] = engine.df_raw.apply(
@@ -626,7 +629,7 @@ else:
                     df_results, reduction_summary = apply_warehouse_reduction(
                         engine, df_results,
                         float(reduction_monthly_threshold),
-                        float(reduction_ratio_threshold)
+                        float(reduction_ratio_f)
                     )
                     st.session_state.reduction_summary = reduction_summary
                 else:
@@ -647,10 +650,10 @@ else:
                     "new_product_threshold": new_product_threshold,
                     "new_product_min_orders": new_product_min_orders,
                     "k_cat": k_cat, "seasonal_cats": seasonal_cats,
-                    "conc_high": conc_high, "conc_low": conc_low,
+                    "conc_high": conc_high_f, "conc_low": conc_low_f,
                     "reduction_on": reduction_on,
                     "reduction_monthly": reduction_monthly_threshold,
-                    "reduction_ratio": reduction_ratio_threshold,
+                    "reduction_ratio": reduction_ratio_f,
                     "target_start_seq": target_start_seq,
                     "target_end_seq": target_end_seq,
                 }
@@ -684,10 +687,10 @@ if st.session_state.df_results is not None:
             "new_product_threshold": new_product_threshold,
             "new_product_min_orders": new_product_min_orders,
             "k_cat": k_cat, "seasonal_cats": seasonal_cats,
-            "conc_high": conc_high, "conc_low": conc_low,
+            "conc_high": conc_high_f, "conc_low": conc_low_f,
             "reduction_on": reduction_on,
             "reduction_monthly": reduction_monthly_threshold,
-            "reduction_ratio": reduction_ratio_threshold,
+            "reduction_ratio": reduction_ratio_f,
             "target_start_seq": target_start_seq,
             "target_end_seq": target_end_seq,
         }
