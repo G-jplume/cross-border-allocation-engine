@@ -314,20 +314,20 @@ eff("目标发货月份",
     f"（{len(target_months_set)}个月份）。强季节只看目标期同月，弱季节放开全部。")
 
 # ---------- 时间衰减 ----------
-st.sidebar.subheader("时间衰减加权")
-st.sidebar.caption("同月用λ_same，非同月用λ×月份相似度（同月1.0/相邻0.6/隔2月0.3/隔3月+0.1）。")
+with st.sidebar.expander("时间衰减加权", expanded=True):
+    st.caption("同月用λ_same，非同月用λ×月份相似度（同月1.0/相邻0.6/隔2月0.3/隔3月+0.1）。")
 
-lambda_val = st.sidebar.slider(
-    "非同月衰减速度 λ", 0.50, 1.00, 0.80, 0.01,
-    help="非同月数据时间衰减率。0.80=每月衰减20%。"
-)
-lambda_same = st.sidebar.slider(
-    "同月跨年衰减速度 λ_same", 0.80, 1.00, 0.95, 0.01,
-    help="同月跨年衰减率。0.95=去年保留95%。"
-)
-st.sidebar.caption(
-    f"同月：去年{lambda_same:.0%}，前年{lambda_same**2:.0%} | 非同月：1月前{lambda_val:.0%}×相似度，6月前{lambda_val**6:.0%}×相似度"
-)
+    lambda_val = st.slider(
+        "非同月衰减速度 λ", 0.50, 1.00, 0.80, 0.01,
+        help="非同月数据时间衰减率。0.80=每月衰减20%。"
+    )
+    lambda_same = st.slider(
+        "同月跨年衰减速度 λ_same", 0.80, 1.00, 0.95, 0.01,
+        help="同月跨年衰减率。0.95=去年保留95%。"
+    )
+    st.caption(
+        f"同月：去年{lambda_same:.0%}，前年{lambda_same**2:.0%} | 非同月：1月前{lambda_val:.0%}×相似度，6月前{lambda_val**6:.0%}×相似度"
+    )
 
 # ---------- 季节适用品类 ----------
 _cats_all, _default_cats = get_seasonal_defaults(st.session_state.df_raw)
@@ -558,68 +558,66 @@ if st.session_state.df_raw is None:
 else:
     with st.container(border=True):
         st.markdown("#### ⚙️ 计算选项")
-        st.caption("选配后点击下方按钮")
 
         if "一级分类" in st.session_state.df_raw.columns:
-            cat_shift_thresh = st.slider(
-                "品类层偏移阈值%", 5, 40, 15, 1,
-                format="%d%%",
-                help="品类层偏移量≥此值→默认勾选强季节；SKU数据不足时也用此阈值"
-            )
-            cat_shift_f = cat_shift_thresh / 100.0
-            _cats_all, _ = get_seasonal_defaults(st.session_state.df_raw)
-            _default_cats = compute_seasonal_shifts_preview(
-                st.session_state.df_raw, target_start_seq, target_end_seq, cat_shift_f
-            )
-            st.markdown("**🌿 季节适用品类**")
-            st.caption("默认根据分仓偏移量自动推荐强季节品类（偏移≥品类层阈值），可手动增减。勾选的品类只用目标期同月数据")
-            seasonal_cats = st.multiselect(
-                "选择品类",
-                options=_cats_all,
-                default=_default_cats if _default_cats else [],
-                key="seasonal_cats_main",
-                label_visibility="collapsed",
-            )
+            with st.expander("🌿 季节适用品类", expanded=True):
+                cat_shift_thresh = st.slider(
+                    "品类层偏移阈值%", 5, 40, 15, 1,
+                    format="%d%%",
+                    help="品类层偏移量≥此值→默认勾选强季节；SKU数据不足时也用此阈值"
+                )
+                cat_shift_f = cat_shift_thresh / 100.0
+                _cats_all, _ = get_seasonal_defaults(st.session_state.df_raw)
+                _default_cats = compute_seasonal_shifts_preview(
+                    st.session_state.df_raw, target_start_seq, target_end_seq, cat_shift_f
+                )
+                st.caption("默认根据分仓偏移量自动推荐强季节品类（偏移≥品类层阈值），可手动增减")
+                seasonal_cats = st.multiselect(
+                    "选择品类",
+                    options=_cats_all,
+                    default=_default_cats if _default_cats else [],
+                    key="seasonal_cats_main",
+                    label_visibility="collapsed",
+                )
         else:
             seasonal_cats = []
             cat_shift_f = 0.15
+            cat_shift_thresh = 15
 
-        st.markdown("---")
-        st.markdown("**🔍 SKU级分仓偏移自动检测**")
-        st.caption("系统自动算每个SKU目标期vs非目标期的四仓占比差异。偏移大→分仓随季节变化→强季节，偏移小→分仓稳定→弱季节。数据不足时回退到SPU→品类层")
-        col_c1, col_c2 = st.columns(2)
-        with col_c1:
-            shift_high = st.slider(
-                "强季节偏移阈值（≥此值）%", 5, 50, 20, 1,
-                format="%d%%",
-                help="SKU/SPU层偏移量≥此值→强季节（需目标期和非目标期各≥50单）"
-            )
-        with col_c2:
-            shift_low = st.slider(
-                "弱季节偏移阈值（≤此值）%", 1, 30, 10, 1,
-                format="%d%%",
-                help="SKU/SPU层偏移量≤此值→弱季节（需目标期和非目标期各≥50单）"
-            )
-        shift_high_f = shift_high / 100.0
-        shift_low_f = shift_low / 100.0
-        st.caption(f"SKU/SPU层：偏移≥{shift_high}%→强 | ≤{shift_low}%→弱 | 中间→回退品类层 | 品类层：≥{cat_shift_thresh}%→强")
+        with st.expander("🔍 SKU级分仓偏移检测", expanded=False):
+            st.caption("偏移大→分仓随季节变化→强季节，偏移小→分仓稳定→弱季节。数据不足时回退到SPU→品类层")
+            col_c1, col_c2 = st.columns(2)
+            with col_c1:
+                shift_high = st.slider(
+                    "强季节偏移阈值（≥此值）%", 5, 50, 20, 1,
+                    format="%d%%",
+                    help="SKU/SPU层偏移量≥此值→强季节（需目标期和非目标期各≥50单）"
+                )
+            with col_c2:
+                shift_low = st.slider(
+                    "弱季节偏移阈值（≤此值）%", 1, 30, 10, 1,
+                    format="%d%%",
+                    help="SKU/SPU层偏移量≤此值→弱季节（需目标期和非目标期各≥50单）"
+                )
+            shift_high_f = shift_high / 100.0
+            shift_low_f = shift_low / 100.0
+            st.caption(f"偏移≥{shift_high}%→强 | ≤{shift_low}%→弱 | 中间→回退品类层（≥{cat_shift_thresh}%）")
 
-        st.markdown("---")
-        st.markdown("**📦 减仓优化**")
-        col_r1, col_r2 = st.columns(2)
-        with col_r1:
-            reduction_monthly_threshold = st.number_input(
-                "月均单量上限", min_value=1, value=3, step=1,
-                help="月均低于此值的仓点会被减仓"
-            )
-        with col_r2:
-            reduction_ratio_threshold = st.slider(
-                "占比上限%", 1, 20, 5, 1, format="%d%%",
-                help="占比低于此值的仓点会被减仓"
-            )
-        reduction_ratio_f = reduction_ratio_threshold / 100.0
-        st.caption(f"月均<{reduction_monthly_threshold}单且占比<{reduction_ratio_threshold}%的仓点按比例均分到其他仓")
-        reduction_on = st.checkbox("启用减仓优化", value=False)
+        with st.expander("📦 减仓优化", expanded=False):
+            col_r1, col_r2 = st.columns(2)
+            with col_r1:
+                reduction_monthly_threshold = st.number_input(
+                    "月均单量上限", min_value=1, value=3, step=1,
+                    help="月均低于此值的仓点会被减仓"
+                )
+            with col_r2:
+                reduction_ratio_threshold = st.slider(
+                    "占比上限%", 1, 20, 5, 1, format="%d%%",
+                    help="占比低于此值的仓点会被减仓"
+                )
+            reduction_ratio_f = reduction_ratio_threshold / 100.0
+            st.caption(f"月均<{reduction_monthly_threshold}单且占比<{reduction_ratio_threshold}%的仓点按比例均分到其他仓")
+            reduction_on = st.checkbox("启用减仓优化", value=False)
 
     if st.button("🚀 开始计算", type="primary", use_container_width=True):
         try:
@@ -737,7 +735,7 @@ if st.session_state.df_results is not None:
             "new_product_threshold": new_product_threshold,
             "new_product_min_orders": new_product_min_orders,
             "k_cat": k_cat, "seasonal_cats": seasonal_cats,
-            "conc_high": conc_high_f, "conc_low": conc_low_f,
+            "shift_high": shift_high_f, "shift_low": shift_low_f,
             "reduction_on": reduction_on,
             "reduction_monthly": reduction_monthly_threshold,
             "reduction_ratio": reduction_ratio_f,
