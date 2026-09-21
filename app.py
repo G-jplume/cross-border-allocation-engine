@@ -58,7 +58,7 @@ def compute_seasonal_shifts_preview(df, target_months_set, cat_shift_threshold=0
     target_months_set: 目标期月份编号集合（如 {1, 2, 3}），用月份而非年月序列匹配历史数据。
     """
     if df is None or "一级分类" not in df.columns:
-        return []
+        return [], {}
     df_tmp = df.copy()
     df_tmp["在目标期"] = df_tmp["月"].apply(lambda m: int(m) in target_months_set)
     in_target = df_tmp[df_tmp["在目标期"]]
@@ -88,7 +88,8 @@ def compute_seasonal_shifts_preview(df, target_months_set, cat_shift_threshold=0
     for label in set(list(cats_in.keys()) + list(cats_out.keys())):
         shifts[label] = calc_shift(cats_in.get(label), cats_out.get(label))
 
-    return [c for c, s in sorted(shifts.items(), key=lambda x: -x[1]) if s >= cat_shift_threshold]
+    recommended = [c for c, s in sorted(shifts.items(), key=lambda x: -x[1]) if s >= cat_shift_threshold]
+    return recommended, shifts
 
 
 def read_csv_auto(path):
@@ -575,9 +576,14 @@ else:
                 with col_s2:
                     cat_shift_f = cat_shift_thresh / 100.0
                     _cats_all, _ = get_seasonal_defaults(st.session_state.df_raw)
-                    _default_cats = compute_seasonal_shifts_preview(
+                    _default_cats, _shifts = compute_seasonal_shifts_preview(
                         st.session_state.df_raw, target_months_set, cat_shift_f
                     )
+                    _shifts_sorted = sorted(_shifts.items(), key=lambda x: -x[1])
+                    _shifts_display = " | ".join(
+                        f"{c}: {s*100:.0f}%" for c, s in _shifts_sorted
+                    )
+                    st.caption(f"各品类偏移量：{_shifts_display}")
                     st.caption("偏移≥阈值→自动勾选，可手动增减")
                     seasonal_cats = st.multiselect(
                         "选择品类",
