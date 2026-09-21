@@ -42,13 +42,6 @@ _guide_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "guide.md
 with open(_guide_path, encoding="utf-8") as _gf:
     GUIDE_MD = _gf.read()
 
-# 读取 Word 版本使用说明（gen_docx_guide.py 从 guide.md 生成）
-_docx_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "分仓占比计算引擎_使用说明.docx")
-_docx_data = None
-if os.path.exists(_docx_path):
-    with open(_docx_path, "rb") as _df:
-        _docx_data = _df.read()
-
 
 def get_seasonal_defaults(df):
     """从数据中提取品类列表和默认强季节品类。"""
@@ -86,32 +79,13 @@ st.markdown(
 
 _col_title, _col_dl = st.columns([4, 1])
 with _col_dl:
-    if _docx_data:
-        _dl1, _dl2 = st.columns(2)
-        with _dl1:
-            st.download_button(
-                "📄 Word",
-                data=_docx_data,
-                file_name="分仓占比计算引擎_使用说明.docx",
-                mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-                use_container_width=True,
-            )
-        with _dl2:
-            st.download_button(
-                "📝 MD",
-                data=GUIDE_MD.encode("utf-8-sig"),
-                file_name="分仓占比计算引擎_使用说明.md",
-                mime="text/markdown",
-                use_container_width=True,
-            )
-    else:
-        st.download_button(
-            "📄 下载说明",
-            data=GUIDE_MD.encode("utf-8-sig"),
-            file_name="分仓占比计算引擎_使用说明.md",
-            mime="text/markdown",
-            use_container_width=True,
-        )
+    st.download_button(
+        "📄 下载说明",
+        data=GUIDE_MD.encode("utf-8-sig"),
+        file_name="分仓占比计算引擎_使用说明.md",
+        mime="text/markdown",
+        use_container_width=True,
+    )
 
 
 def apply_warehouse_reduction(engine, df_results, monthly_threshold, ratio_threshold):
