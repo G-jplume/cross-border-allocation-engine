@@ -92,10 +92,6 @@ class AllocationEngine:
         return {}
 
     def _load_benchmarks(self):
-        path = os.path.join(self.data_dir, "sheet4_benchmarks.json")
-        if os.path.exists(path):
-            with open(path, "r", encoding="utf-8") as f:
-                return json.load(f)
         return {"室内外": [], "一级分类": [], "SPU": []}
 
     def load_data(self):
@@ -104,8 +100,6 @@ class AllocationEngine:
             encoding="utf-8-sig",
             dtype={"源SKU": str, "SPU": str, "室内外": str, "一级分类": str, "运算SKU": str}
         )
-        with open(os.path.join(self.data_dir, "sheet4_benchmarks.json"), "r", encoding="utf-8") as f:
-            self.benchmarks = json.load(f)
         print(f"Loaded {len(self.df_raw)} rows from Sheet2")
         return self.df_raw
 
@@ -400,9 +394,6 @@ class AllocationEngine:
 
     def step4_benchmark(self):
         k_cat = float(self.k_cat)
-        spu_bm = {bm["label"]: bm for bm in self.benchmarks.get("SPU", [])}
-        cat_bm = {bm["label"]: bm for bm in self.benchmarks.get("一级分类", [])}
-        indoor_bm = {bm["label"]: bm for bm in self.benchmarks.get("室内外", [])}
 
         all_target = self.df_raw[self.df_raw["在目标期_py"] == 1]
         overall_total = all_target[WAREHOUSES].sum(axis=1).sum()
@@ -441,7 +432,7 @@ class AllocationEngine:
         cat_obs = compute_group_obs("一级分类")
         indoor_obs = compute_group_obs("室内外")
 
-        # --- 建立收缩后的基准表 ---
+        # --- 建立收缩后的基准表（全部从导入数据动态计算） ---
         # 一级分类基准 = shrink(品类观测, n, 全公司)
         cat_shrunk = {}
         for label, o in cat_obs.items():
@@ -481,31 +472,16 @@ class AllocationEngine:
             bm_n = overall_total
             bm_parent = "—"
 
-            if spu and spu in spu_bm and spu_bm[spu].get("观测数", 0) > 0:
-                bm = spu_bm[spu]
-                bm_ratios = {wh: bm[f"基准_{wh}"] for wh in WAREHOUSES}
-                used_level = "SPU(预存)"
-                bm_n = bm.get("观测数")
-            elif spu and spu in spu_shrunk:
+            if spu and spu in spu_shrunk:
                 bm_ratios = spu_shrunk[spu]["基准"]
                 bm_n = spu_shrunk[spu]["观测数"]
                 bm_parent = spu_shrunk[spu]["父层"]
                 used_level = "SPU"
-            elif cat1 and cat1 in cat_bm and cat_bm[cat1].get("观测数", 0) > 0:
-                bm = cat_bm[cat1]
-                bm_ratios = {wh: bm[f"基准_{wh}"] for wh in WAREHOUSES}
-                used_level = "一级分类(预存)"
-                bm_n = bm.get("观测数")
             elif cat1 and cat1 in cat_shrunk:
                 bm_ratios = cat_shrunk[cat1]["基准"]
                 bm_n = cat_shrunk[cat1]["观测数"]
                 bm_parent = "全公司"
                 used_level = "一级分类"
-            elif indoor and indoor in indoor_bm and indoor_bm[indoor].get("观测数", 0) > 0:
-                bm = indoor_bm[indoor]
-                bm_ratios = {wh: bm[f"基准_{wh}"] for wh in WAREHOUSES}
-                used_level = "室内外(预存)"
-                bm_n = bm.get("观测数")
             elif indoor and indoor in indoor_shrunk:
                 bm_ratios = indoor_shrunk[indoor]["基准"]
                 bm_n = indoor_shrunk[indoor]["观测数"]
