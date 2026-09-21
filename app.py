@@ -652,6 +652,7 @@ else:
             engine.params["trend_cap"] = trend_cap
             engine.params["trend_min_orders"] = trend_min_orders
             engine.new_product_threshold = new_product_threshold
+            engine.params["new_product_min_orders"] = new_product_min_orders
             engine.k_cat = float(k_cat)
             engine.seasonal_categories = seasonal_cats
             engine.shift_threshold_high = float(shift_high_f)
