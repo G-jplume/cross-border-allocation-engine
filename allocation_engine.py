@@ -5,7 +5,7 @@
 计算链路（5步）:
 1. 运算SKU映射       (VLOOKUP + TEXTBEFORE fallback)
 2. 时间衰减加权       (w = λ^|anchor - month_seq|, 含月份相似度)
-3. 自身占比           (含季节品类分支 + SKU级集中度自动检测, SUMIFS by 运算SKU / SUMIFS total)
+3. 自身占比 (含季节品类分支 + SKU级分仓偏移分层检测, SUMIFS by 运算SKU / SUMIFS total)
 4. 基准占比           (SPU → 一级分类 → 室内外 → 全公司 回退 + 品类层贝叶斯收缩)
 5. 最终占比           (a×自身 + (1-a)×基准) + 趋势调整(α, 上限cap) + 归一化 + 落货量
 
@@ -15,7 +15,7 @@
 ├────────────────────┼──────────────┼──────────────────────────────┤
 │ lambda 衰减速度    │ 原始数据加权 │ 全局，所有品类                │
 │ seasonal_* 季节因子│ 原始数据加权 │ 仅适用品类，与衰减相乘        │
-│ conc 集中度阈值    │ 自身占比     │ SKU级自动检测强/弱季节        │
+│ shift 偏移量阈值   │ 自身占比     │ SKU级自动检测强/弱季节        │
 │ alpha_trend 趋势α  │ 最终占比     │ 归一化前叠加趋势差            │
 │ trend_cap 调整上限 │ 最终占比     │ 单仓趋势调整幅度上限          │
 │ k 收缩强度         │ SKU 层混合   │ 自身 vs 基准                  │
@@ -49,9 +49,11 @@ class AllocationEngine:
         self.k_cat = float(self.params.get("k_cat", 12.0))
         # 季节适用品类（None 表示使用 params 里的默认值）
         self.seasonal_categories = None
-        # SKU级集中度自动检测阈值
-        self.concentration_threshold_high = float(self.params.get("concentration_threshold_high", 0.80))
-        self.concentration_threshold_low = float(self.params.get("concentration_threshold_low", 0.20))
+        # 分仓偏移量阈值（替代集中度）
+        self.shift_threshold_high = float(self.params.get("shift_threshold_high", 0.20))
+        self.shift_threshold_low = float(self.params.get("shift_threshold_low", 0.10))
+        self.cat_shift_threshold = float(self.params.get("cat_shift_threshold", 0.15))
+        self.shift_min_orders = int(self.params.get("shift_min_orders", 50))
         # 趋势窗口（None 表示按 anchor 自动推导）
         self.trend_recent = None
         self.trend_far = None
@@ -69,8 +71,10 @@ class AllocationEngine:
         "lambda_same_month": 0.95,
         "new_product_min_orders": 20,
         "k_cat": 12.0,
-        "concentration_threshold_high": 0.70,
-        "concentration_threshold_low": 0.20,
+        "shift_threshold_high": 0.20,
+        "shift_threshold_low": 0.10,
+        "cat_shift_threshold": 0.15,
+        "shift_min_orders": 50,
     }
 
     def _load_params(self):
@@ -269,9 +273,127 @@ class AllocationEngine:
         self.df_raw = df
         return df
 
-    # =========================================================
-    # Step 3: 自身占比（含季节品类分支）
-    # =========================================================
+    def _compute_ratios(self, group_rows):
+        wh_sums = {wh: group_rows[wh].sum() for wh in WAREHOUSES}
+        total = sum(wh_sums.values())
+        if total == 0:
+            return None, 0
+        return {wh: wh_sums[wh] / total for wh in WAREHOUSES}, int(total)
+
+    def _calc_shift(self, ratios_a, ratios_b):
+        if ratios_a is None or ratios_b is None:
+            return 0.0
+        return sum(abs(ratios_a.get(wh, 0) - ratios_b.get(wh, 0)) for wh in WAREHOUSES)
+
+    def compute_seasonal_shifts(self):
+        """计算品类/SPU/SKU三层的分仓偏移量，用于季节性判定。
+
+        偏移量 = 目标期四仓占比 vs 非目标期四仓占比的差异（绝对值之和）。
+        品类层偏移量≥阈值→默认强季节，SKU层通过分层回退判定。
+        """
+        df = self.df_raw
+        target_months = self._get_target_months()
+        is_same_month = df["月"].apply(lambda m: int(m) in target_months)
+        in_target = df[is_same_month]
+        out_target = df[~is_same_month]
+
+        cat_in = {}
+        cat_out = {}
+        for label, group in in_target.groupby("一级分类"):
+            r, n = self._compute_ratios(group)
+            cat_in[label] = (r, n)
+        for label, group in out_target.groupby("一级分类"):
+            r, n = self._compute_ratios(group)
+            cat_out[label] = (r, n)
+
+        self._cat_shifts = {}
+        for label in set(list(cat_in.keys()) + list(cat_out.keys())):
+            r_in, n_in = cat_in.get(label, (None, 0))
+            r_out, n_out = cat_out.get(label, (None, 0))
+            shift = self._calc_shift(r_in, r_out)
+            self._cat_shifts[label] = {"shift": shift, "n_in": n_in, "n_out": n_out,
+                                       "r_in": r_in, "r_out": r_out}
+
+        spu_in = {}
+        spu_out = {}
+        for label, group in in_target.groupby("SPU"):
+            r, n = self._compute_ratios(group)
+            spu_in[label] = (r, n)
+        for label, group in out_target.groupby("SPU"):
+            r, n = self._compute_ratios(group)
+            spu_out[label] = (r, n)
+
+        self._spu_shifts = {}
+        for label in set(list(spu_in.keys()) + list(spu_out.keys())):
+            r_in, n_in = spu_in.get(label, (None, 0))
+            r_out, n_out = spu_out.get(label, (None, 0))
+            shift = self._calc_shift(r_in, r_out)
+            self._spu_shifts[label] = {"shift": shift, "n_in": n_in, "n_out": n_out}
+
+        self._sku_shifts = {}
+        for sku, group in df.groupby("运算SKU_py"):
+            sku_in = group[group["月"].apply(lambda m: int(m) in target_months)]
+            sku_out = group[~group["月"].apply(lambda m: int(m) in target_months)]
+            r_in, n_in = self._compute_ratios(sku_in)
+            r_out, n_out = self._compute_ratios(sku_out)
+            shift = self._calc_shift(r_in, r_out)
+            self._sku_shifts[sku] = {"shift": shift, "n_in": n_in, "n_out": n_out}
+
+        auto_cats = [c for c, d in self._cat_shifts.items()
+                     if d["shift"] >= self.cat_shift_threshold]
+        return auto_cats
+
+    def get_default_seasonal_cats(self):
+        """基于分仓偏移量自动推荐强季节品类。"""
+        if not hasattr(self, "_cat_shifts") or not self._cat_shifts:
+            return self._get_seasonal_categories()
+        return [c for c, d in sorted(self._cat_shifts.items(), key=lambda x: -x[1]["shift"])
+                if d["shift"] >= self.cat_shift_threshold]
+
+    def _determine_sku_seasonality(self, sku, all_rows, cats):
+        """SKU级分层检测：SKU→SPU→品类→弱季节。"""
+        high = self.shift_threshold_high
+        low = self.shift_threshold_low
+        min_orders = self.shift_min_orders
+
+        sku_data = self._sku_shifts.get(sku, {})
+        sku_shift = sku_data.get("shift", 0)
+        n_in = sku_data.get("n_in", 0)
+        n_out = sku_data.get("n_out", 0)
+
+        if n_in >= min_orders and n_out >= min_orders:
+            if sku_shift >= high:
+                return True, f"SKU偏移{sku_shift:.0%}≥{high:.0%}", sku_shift
+            elif sku_shift <= low:
+                return False, f"SKU偏移{sku_shift:.0%}≤{low:.0%}", sku_shift
+
+        spu_val = str(all_rows.iloc[0]["SPU"]).strip() if "SPU" in all_rows.columns and len(all_rows) > 0 else None
+        if spu_val:
+            spu_data = self._spu_shifts.get(spu_val, {})
+            spu_shift = spu_data.get("shift", 0)
+            s_n_in = spu_data.get("n_in", 0)
+            s_n_out = spu_data.get("n_out", 0)
+            if s_n_in >= min_orders and s_n_out >= min_orders:
+                if spu_shift >= high:
+                    return True, f"SPU偏移{spu_shift:.0%}≥{high:.0%}", spu_shift
+                elif spu_shift <= low:
+                    return False, f"SPU偏移{spu_shift:.0%}≤{low:.0%}", spu_shift
+
+        cat_val = str(all_rows.iloc[0]["一级分类"]).strip() if "一级分类" in all_rows.columns and len(all_rows) > 0 else None
+        if cat_val:
+            cat_data = self._cat_shifts.get(cat_val, {})
+            cat_shift = cat_data.get("shift", 0)
+            c_n_in = cat_data.get("n_in", 0)
+            c_n_out = cat_data.get("n_out", 0)
+            if cat_shift >= self.cat_shift_threshold:
+                return True, f"品类偏移{cat_shift:.0%}≥{self.cat_shift_threshold:.0%}", cat_shift
+            elif cat_shift <= low:
+                return False, f"品类偏移{cat_shift:.0%}≤{low:.0%}", cat_shift
+
+        cat_is_seasonal = cat_val in cats if cat_val else False
+        if cat_is_seasonal:
+            return True, "品类勾选", 0.0
+        return False, "弱季节（数据不足）", 0.0
     def _add_weighted_cols(self):
         """加权列 = 衰减权重 × 原始量。"""
         df = self.df_raw
@@ -291,40 +413,18 @@ class AllocationEngine:
         all_grouped = dict(tuple(df.groupby("运算SKU_py")))
         same_groups = dict(tuple(same_month_df.groupby("运算SKU_py")))
 
-        high_thresh = self.concentration_threshold_high
-        low_thresh = self.concentration_threshold_low
+        self.compute_seasonal_shifts()
 
         sku_weighted = {}
         n_strong_same = 0
         n_strong_fallback = 0
         n_weak_all = 0
-        n_auto_strong = 0
-        n_auto_weak = 0
 
         for sku, all_rows in all_grouped.items():
             same_rows = same_groups.get(sku, pd.DataFrame())
             same_total = same_rows["加权合计_py"].sum() if len(same_rows) > 0 else 0
 
-            same_raw = int(same_rows[WAREHOUSES].sum(axis=1).sum()) if len(same_rows) > 0 else 0
-            all_raw = int(all_rows[WAREHOUSES].sum(axis=1).sum())
-            concentration = same_raw / all_raw if all_raw > 0 else 0.0
-
-            cat_is_seasonal = False
-            if "一级分类" in all_rows.columns and len(all_rows) > 0:
-                cat_val = str(all_rows.iloc[0]["一级分类"]).strip()
-                cat_is_seasonal = cat_val in cats
-
-            if concentration >= high_thresh:
-                is_seasonal = True
-                seasonality_source = "自动-高集中度"
-                n_auto_strong += 1
-            elif concentration <= low_thresh:
-                is_seasonal = False
-                seasonality_source = "自动-低集中度"
-                n_auto_weak += 1
-            else:
-                is_seasonal = cat_is_seasonal
-                seasonality_source = "品类" if cat_is_seasonal else "弱季节"
+            is_seasonal, seasonality_source, shift_val = self._determine_sku_seasonality(sku, all_rows, cats)
 
             if is_seasonal:
                 if same_total > 0:
@@ -358,7 +458,7 @@ class AllocationEngine:
                 "self_ratios": {wh: wh_sums[wh] / total for wh in WAREHOUSES},
                 "used_months": used_months,
                 "is_seasonal": is_seasonal,
-                "concentration": concentration,
+                "shift": shift_val,
                 "seasonality_source": seasonality_source,
             }
 
@@ -372,7 +472,6 @@ class AllocationEngine:
               f"(strong-seasonal same-month: {n_strong_same}, "
               f"strong-seasonal fallback: {n_strong_fallback}, "
               f"weak-seasonal all-months: {n_weak_all}, "
-              f"auto-strong: {n_auto_strong}, auto-weak: {n_auto_weak}, "
               f"target months: {target_months})")
         self.sku_weighted = sku_weighted
         return sku_weighted
@@ -606,7 +705,7 @@ class AllocationEngine:
                 "是否新品": "是" if is_new else "否",
                 "收缩权重_a": a,
                 "趋势alpha": trend_alpha,
-                "季节集中度": sw.get("concentration", 0.0),
+                "季节偏移量": sw.get("shift", 0.0),
                 "季节性来源": sw.get("seasonality_source", ""),
                 "基准层级": sb["level"],
                 "基准观测数": sb.get("benchmark_n", ""),
@@ -685,14 +784,20 @@ class AllocationEngine:
         if self.sku_weighted:
             n_strong = sum(1 for sw in self.sku_weighted.values() if sw.get("is_seasonal"))
             n_weak = len(self.sku_weighted) - n_strong
-            n_auto_strong = sum(1 for sw in self.sku_weighted.values() if sw.get("seasonality_source") == "自动-高集中度")
-            n_auto_weak = sum(1 for sw in self.sku_weighted.values() if sw.get("seasonality_source") == "自动-低集中度")
-            n_cat = sum(1 for sw in self.sku_weighted.values() if sw.get("seasonality_source") == "品类")
+            n_sku = sum(1 for sw in self.sku_weighted.values() if "SKU偏移" in sw.get("seasonality_source", ""))
+            n_spu = sum(1 for sw in self.sku_weighted.values() if "SPU偏移" in sw.get("seasonality_source", ""))
+            n_cat = sum(1 for sw in self.sku_weighted.values() if "品类偏移" in sw.get("seasonality_source", ""))
+            n_cat_sel = sum(1 for sw in self.sku_weighted.values() if sw.get("seasonality_source") == "品类勾选")
+            n_fallback = sum(1 for sw in self.sku_weighted.values() if "数据不足" in sw.get("seasonality_source", ""))
             cats = self._get_seasonal_categories()
+            cat_shifts = getattr(self, "_cat_shifts", {})
+            shift_info = ", ".join(f"{c}={d['shift']:.0%}" for c, d in sorted(cat_shifts.items(), key=lambda x: -x[1]["shift"])[:5])
             checks.append(("季节性判定生效", n_strong > 0 or n_weak > 0,
                            f"强季节SKU: {n_strong} 个（只用同月）, 弱季节SKU: {n_weak} 个（用全部月份加权）\n"
-                           f"  其中：自动高集中度→强: {n_auto_strong}, 自动低集中度→弱: {n_auto_weak}, 品类决定: {n_cat}\n"
-                           f"  集中度阈值: 高≥{self.concentration_threshold_high:.0%}, 低≤{self.concentration_threshold_low:.0%}, 适用品类: {cats}"))
+                           f"  判定来源：SKU偏移={n_sku}, SPU偏移={n_spu}, 品类偏移={n_cat}, 品类勾选={n_cat_sel}, 数据不足={n_fallback}\n"
+                           f"  偏移量阈值: SKU/SPU层 强≥{self.shift_threshold_high:.0%}/弱≤{self.shift_threshold_low:.0%}, 品类层≥{self.cat_shift_threshold:.0%}, 最小单量={self.shift_min_orders}\n"
+                           f"  品类偏移: {shift_info}\n"
+                           f"  适用品类: {cats}"))
 
         alpha = float(self.params.get("alpha_trend", 0) or 0)
         if df_results is not None and len(df_results) and "趋势差_美西" in df_results.columns:
