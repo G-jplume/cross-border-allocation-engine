@@ -58,8 +58,8 @@ class AllocationEngine:
 
     # 默认参数（文件不存在时使用）
     DEFAULT_PARAMS = {
-        "anchor": 24325, "lambda": 0.85, "k": 8.0,
-        "a_min": 0.0, "a_max": 0.9,
+        "anchor": 24325, "lambda": 0.80, "k": 8.0,
+        "a_min": 0.0, "a_max": 0.85,
         "target_start": 1, "target_end": 3,
         "alpha_trend": 0.3, "trend_cap": 0.05,
         "trend_min_orders": 50,
