@@ -44,7 +44,6 @@ class AllocationEngine:
         self.df_raw = None
         self.sku_weighted = None
         self.sku_benchmarks = None
-        self.benchmarks = self._load_benchmarks()
         # 品类层最小等效观测数（贝叶斯收缩虚拟样本量）
         self.k_cat = float(self.params.get("k_cat", 12.0))
         # 季节适用品类（None 表示使用 params 里的默认值）
@@ -94,9 +93,6 @@ class AllocationEngine:
                 mapping_list = json.load(f)
             return {item["源SKU"]: item["相似SKU"] for item in mapping_list}
         return {}
-
-    def _load_benchmarks(self):
-        return {"室内外": [], "一级分类": [], "SPU": []}
 
     def load_data(self):
         self.df_raw = pd.read_csv(
@@ -227,7 +223,8 @@ class AllocationEngine:
 
         # 判断是否为同月（月份编号在目标期月份列表中）
         target_months = self._get_target_months()
-        is_same_month = df["月"].apply(lambda m: int(m) in target_months)
+        target_months_set = set(target_months)
+        is_same_month = df["月"].astype(int).isin(target_months_set)
 
         # 月份相似度权重：同月=1.0，相邻月=0.6，隔2月=0.3，隔3月以上=0.1
         def month_similarity(m, target_mths):
@@ -249,7 +246,7 @@ class AllocationEngine:
         # 判断是否为强季节品类
         is_seasonal_cat = df["一级分类"].isin(cats) if "一级分类" in df.columns else pd.Series(False, index=df.index)
 
-        # 时间衰减 × 月份相似度（所有品类统一公式，品类分支在 step4 实现）
+        # 时间衰减 × 月份相似度（所有品类统一公式，品类分支在 step3 实现）
         # 同月 → λ_same^dist × 1.0
         # 非同月 → λ^dist × month_sim
         time_decay = np.where(
@@ -292,10 +289,11 @@ class AllocationEngine:
         品类层偏移量≥阈值→默认强季节，SKU层通过分层回退判定。
         """
         df = self.df_raw
-        target_months = self._get_target_months()
-        is_same_month = df["月"].apply(lambda m: int(m) in target_months)
-        in_target = df[is_same_month]
-        out_target = df[~is_same_month]
+        target_months = set(self._get_target_months())
+        df = df.copy()
+        df["_is_target"] = df["月"].astype(int).isin(target_months)
+        in_target = df[df["_is_target"]]
+        out_target = df[~df["_is_target"]]
 
         cat_in = {}
         cat_out = {}
@@ -332,8 +330,8 @@ class AllocationEngine:
 
         self._sku_shifts = {}
         for sku, group in df.groupby("运算SKU_py"):
-            sku_in = group[group["月"].apply(lambda m: int(m) in target_months)]
-            sku_out = group[~group["月"].apply(lambda m: int(m) in target_months)]
+            sku_in = group[group["_is_target"]]
+            sku_out = group[~group["_is_target"]]
             r_in, n_in = self._compute_ratios(sku_in)
             r_out, n_out = self._compute_ratios(sku_out)
             shift = self._calc_shift(r_in, r_out)
@@ -394,6 +392,7 @@ class AllocationEngine:
         if cat_is_seasonal:
             return True, "品类勾选", 0.0
         return False, "弱季节（数据不足）", 0.0
+
     def _add_weighted_cols(self):
         """加权列 = 衰减权重 × 原始量。"""
         df = self.df_raw
@@ -408,7 +407,8 @@ class AllocationEngine:
         target_months = self._get_target_months()
         cats = self._get_seasonal_categories()
 
-        is_same_month = df["月"].apply(lambda m: int(m) in target_months)
+        target_months_set = set(target_months)
+        is_same_month = df["月"].astype(int).isin(target_months_set)
         same_month_df = df[is_same_month].copy()
         all_grouped = dict(tuple(df.groupby("运算SKU_py")))
         same_groups = dict(tuple(same_month_df.groupby("运算SKU_py")))
@@ -494,7 +494,11 @@ class AllocationEngine:
     def step4_benchmark(self):
         k_cat = float(self.k_cat)
 
-        all_target = self.df_raw[self.df_raw["在目标期_py"] == 1]
+        if "在目标期_py" in self.df_raw.columns:
+            all_target = self.df_raw[self.df_raw["在目标期_py"] == 1]
+        else:
+            target_months = set(self._get_target_months())
+            all_target = self.df_raw[self.df_raw["月"].apply(lambda m: int(m) in target_months)]
         overall_total = all_target[WAREHOUSES].sum(axis=1).sum()
         overall_ratios = ({wh: all_target[wh].sum() / overall_total for wh in WAREHOUSES}
                           if overall_total > 0 else {wh: 0.25 for wh in WAREHOUSES})
@@ -595,7 +599,7 @@ class AllocationEngine:
                 "benchmark_parent": bm_parent,
             }
 
-        print(f"  Step5: computed benchmarks for {len(sku_benchmarks)} SKUs "
+        print(f"  Step4: computed benchmarks for {len(sku_benchmarks)} SKUs "
               f"(k_cat={k_cat:g} 品类层收缩)")
         self.sku_benchmarks = sku_benchmarks
         self._cat_shrunk = cat_shrunk
@@ -613,10 +617,10 @@ class AllocationEngine:
         a_min = self.params["a_min"]
         a_max = self.params["a_max"]
         new_threshold = self.new_product_threshold
-        min_orders = int(self.params.get("new_product_min_orders", 10))
+        min_orders = int(self.params.get("new_product_min_orders", 20))
         alpha = float(self.params.get("alpha_trend", 0.3) or 0.0)
         cap = float(self.params.get("trend_cap", 0.05) or 0.0)
-        trend_min_orders = int(self.params.get("trend_min_orders", 30))
+        trend_min_orders = int(self.params.get("trend_min_orders", 50))
 
         df = self.df_raw
         windows = self._resolve_trend_windows() if apply_trend and alpha > 0 else None
@@ -624,10 +628,10 @@ class AllocationEngine:
 
         if trend_used:
             r_lo, r_hi, f_lo, f_hi = windows
-            print(f"  Step6: trend windows recent=[{r_lo},{r_hi}] far=[{f_lo},{f_hi}] "
+            print(f"  Step5: trend windows recent=[{r_lo},{r_hi}] far=[{f_lo},{f_hi}] "
                   f"α={alpha} cap=±{cap} min_orders={trend_min_orders} (raw data, dynamic α)")
         else:
-            print(f"  Step6: trend disabled (α={alpha})")
+            print(f"  Step5: trend disabled (α={alpha})")
 
         # 预先按 运算SKU 建索引，避免循环里反复切片
         df_by_sku = dict(tuple(df.groupby("运算SKU_py")))
@@ -739,7 +743,7 @@ class AllocationEngine:
 
         df_results = pd.DataFrame(results)
         n_new = int((df_results["是否新品"] == "是").sum()) if "是否新品" in df_results.columns else 0
-        print(f"  Step6: computed final ratios for {len(df_results)} SKUs "
+        print(f"  Step5: computed final ratios for {len(df_results)} SKUs "
               f"(new products: {n_new}, min_orders={min_orders})")
         return df_results
 
@@ -876,6 +880,15 @@ def main():
 
     engine = AllocationEngine()
     engine.load_data()
+
+    # 设置在目标期列（独立运行时需要，Streamlit 在 app.py 中设置）
+    ts = int(engine.params.get("target_start", 1))
+    te = int(engine.params.get("target_end", 3))
+    engine.df_raw["在目标期"] = engine.df_raw.apply(
+        lambda row: 1 if ts <= int(row["月"]) <= te or
+        (ts > te and (int(row["月"]) >= ts or int(row["月"]) <= te))
+        else 0, axis=1
+    )
 
     print("\n--- Step 1: 运算SKU映射 ---")
     engine.step1_sku_mapping()
