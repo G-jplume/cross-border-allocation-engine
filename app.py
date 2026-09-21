@@ -573,6 +573,7 @@ else:
                     if st.session_state.get("prev_cat_shift") != cat_shift_thresh:
                         st.session_state["prev_cat_shift"] = cat_shift_thresh
                         st.session_state.pop("seasonal_cats_main", None)
+                        st.rerun()
                 with col_s2:
                     cat_shift_f = cat_shift_thresh / 100.0
                     _cats_all, _ = get_seasonal_defaults(st.session_state.df_raw)
