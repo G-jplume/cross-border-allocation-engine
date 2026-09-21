@@ -330,8 +330,8 @@ with st.sidebar.expander("趋势因子 α", expanded=False):
     _tf_m2 = (trend_far_hi - 1) % 12 + 1
     st.caption(
         f"📅 趋势对比窗口：\n"
-        f"近期（去年同期）= {_tr_y}年{_tr_m}月~{_tr_y2}年{_tr_m2}月\n"
-        f"远期（前年同期）= {_tf_y}年{_tf_m}月~{_tf_y2}年{_tf_m2}月"
+        f"近期（去年同期）= {_tr_y}年{_tr_m}月 至 {_tr_y2}年{_tr_m2}月\n"
+        f"远期（前年同期）= {_tf_y}年{_tf_m}月 至 {_tf_y2}年{_tf_m2}月"
     )
 
 # ---------- 新品与基准 ----------
