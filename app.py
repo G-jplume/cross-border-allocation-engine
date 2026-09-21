@@ -566,8 +566,12 @@ else:
                     cat_shift_thresh = st.slider(
                         "品类层偏移阈值%", 5, 40, 15, 1,
                         format="%d%%",
-                        help="品类层偏移量≥此值→默认勾选强季节；SKU数据不足时也用此阈值"
+                        help="品类层偏移量≥此值→默认勾选强季节；SKU数据不足时也用此阈值",
+                        key="cat_shift_slider"
                     )
+                    if st.session_state.get("prev_cat_shift") != cat_shift_thresh:
+                        st.session_state["prev_cat_shift"] = cat_shift_thresh
+                        st.session_state.pop("seasonal_cats_main", None)
                 with col_s2:
                     cat_shift_f = cat_shift_thresh / 100.0
                     _cats_all, _ = get_seasonal_defaults(st.session_state.df_raw)
