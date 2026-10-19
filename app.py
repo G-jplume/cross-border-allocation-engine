@@ -524,7 +524,23 @@ if st.session_state.df_raw is not None:
         else:
             st.caption("✓ 年份均在合理范围内")
 
-        st.dataframe(_d.head(10), use_container_width=True)
+        c_a, c_b, c_c = st.columns([2, 2, 6])
+        c_a.download_button(
+            "下载原始数据 CSV",
+            data=_d.to_csv(index=False).encode("utf-8-sig"),
+            file_name="原始出单点数据.csv", mime="text/csv",
+            use_container_width=True)
+        _xl_bytes = io.BytesIO()
+        with pd.ExcelWriter(_xl_bytes, engine="openpyxl") as _w:
+            _d.to_excel(_w, index=False, sheet_name="出单点数据")
+        c_b.download_button(
+            "下载原始数据 Excel",
+            data=_xl_bytes.getvalue(),
+            file_name="原始出单点数据.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            use_container_width=True)
+
+        st.dataframe(_d, use_container_width=True, height=420)
 
 with st.expander("混用SKU映射（可选）", expanded=False):
     st.caption("不上传也能算：未映射的 SKU 自动取「-」前部分合并")
