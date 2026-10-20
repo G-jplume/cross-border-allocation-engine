@@ -8,8 +8,8 @@ from docx.oxml.ns import qn
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.oxml import OxmlElement
 
-BASE = r"c:\Users\Administrator\AppData\Roaming\TRAE SOLO CN\ModularData\ai-agent\work-mode-projects\6aa8bbd5fad07774fb71cfd5"
-OUTPUT = os.path.join(BASE, "\u5206\u4ed3\u5360\u6bd4\u8ba1\u7b97\u5f15\u64ce_\u4f7f\u7528\u8bf4\u660e.docx")
+BASE = os.path.dirname(os.path.abspath(__file__))
+OUTPUT = os.path.join(BASE, "分仓占比计算引擎_使用说明.docx")
 
 
 def add_toc(doc, guide_md):
