@@ -391,13 +391,12 @@ with st.sidebar.expander("新品与基准", expanded=False):
 
     k_val = st.slider(
         "收缩强度 k", 1, 20, 8,
-        help="自身权重=n/(n+k)，n=目标期月数。k越大越信基准，越小越信自身。"
+        help="自身权重=n/(n+k)，n=自身样本月数（强季节=目标期同月有出单月数，弱季节=全历史有出单月数）。k越大越信基准，越小越信自身。"
     )
     _est_n = target_end_seq - target_start_seq + 1
     st.caption(
-        f"k={k_val}：目标期约{_est_n}个月 → "
-        f"自身权重≈{_est_n}/({_est_n}+{k_val})={_est_n/(_est_n+k_val):.0%}，"
-        f"基准≈{k_val/(_est_n+k_val):.0%}"
+        f"k={k_val}：强季节SKU n≈{_est_n}个月×年数，弱季节SKU n=全历史月数 → "
+        f"n={_est_n}时自身权重≈{_est_n/(_est_n+k_val):.0%}，基准≈{k_val/(_est_n+k_val):.0%}"
     )
 
     col_a1, col_a2 = st.columns(2)
@@ -671,12 +670,16 @@ else:
             engine.shift_threshold_high = float(shift_high_f)
             engine.shift_threshold_low = float(shift_low_f)
             engine.cat_shift_threshold = float(cat_shift_f)
+            # 趋势窗口显式注入（与界面显示值一致），避免 params.json 硬编码窗口
+            # 冻结——否则改目标期后界面窗口更新而引擎仍用旧窗口
+            engine.trend_recent = (trend_recent_lo, trend_recent_hi)
+            engine.trend_far = (trend_far_lo, trend_far_hi)
 
             with st.status("计算中...", expanded=True) as status:
-                engine.df_raw["在目标期"] = engine.df_raw.apply(
-                    lambda row: 1 if target_start_seq <= int(row["年"]) * 12 + int(row["月"]) <= target_end_seq else 0,
-                    axis=1
-                )
+                # 月份匹配口径：目标期是未来年月，历史数据只能按"月份"对齐（同月）。
+                # 若按年月序列区间打标，未来目标期落在数据范围之外，
+                # 会导致基准样本为空、四仓基准退化为 25%×4
+                engine.df_raw["在目标期"] = engine.df_raw["月"].astype(int).isin(target_months_set).astype(int)
 
                 st.write("步骤1/5：SKU映射...")
                 engine.step1_sku_mapping()
@@ -820,7 +823,7 @@ if st.session_state.df_results is not None:
     if cat_filter:
         df_show = df_show[df_show["一级分类"].isin(cat_filter)]
 
-    base_cols = ["SKU", "SPU", "一级分类", "室内外", "历史月数", "目标期月数",
+    base_cols = ["SKU", "SPU", "一级分类", "室内外", "历史月数", "自身样本月数",
                  "收缩权重_a", "季节偏移量", "季节性来源", "基准层级", "基准观测数"]
     base_cols = [c for c in base_cols if c in df_show.columns]
 
@@ -865,7 +868,7 @@ if st.session_state.df_results is not None:
                 - 一级分类：{_row.get('一级分类', '—')}
                 - 室内外：{_row.get('室内外', '—')}
                 - 历史月数：{_row.get('历史月数', '—')}
-                - 目标期月数：{_row.get('目标期月数', '—')}
+                - 自身样本月数：{_row.get('自身样本月数', '—')}
                 - 目标期单量：{_row.get('目标期单量', '—')}
                 - 是否新品：{_row.get('是否新品', '—')}
                 - 季节偏移量：{_row.get('季节偏移量', 0):.0%}
