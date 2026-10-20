@@ -58,8 +58,10 @@ class AllocationEngine:
         self.trend_far = None
 
     # 默认参数（文件不存在时使用）
+    # 注意：anchor 语义 = 目标期中点（与 app.py 的 (start+end)//2 一致），
+    # 趋势窗口自动推导、时间衰减都以此为基准。
     DEFAULT_PARAMS = {
-        "anchor": 24325, "lambda": 0.80, "k": 8.0,
+        "anchor": 24326, "lambda": 0.80, "k": 8.0,
         "a_min": 0.0, "a_max": 0.85,
         "target_start": 1, "target_end": 3,
         "alpha_trend": 0.3, "trend_cap": 0.05,
@@ -143,7 +145,9 @@ class AllocationEngine:
     def _resolve_trend_windows(self):
         """推导趋势的近期/远期月份序号区间。
 
-        默认策略：以目标期（月数宽度 w）为基准，取
+        优先级：外部显式注入（app.py 按目标期平移注入）> params 配置 > 自动推导。
+        自动推导：anchor 为目标期中点（与 app.py 口径一致），先还原目标期区间：
+          目标期 = [anchor - (w-1)//2, anchor - (w-1)//2 + w - 1]，w=目标期月数
           近期 = 目标期向前平移 1 年
           远期 = 目标期向前平移 2 年
         返回 (recent_lo, recent_hi, far_lo, far_hi) 或 None。
@@ -156,28 +160,16 @@ class AllocationEngine:
         if rs and re_ and fs and fe:
             return int(rs), int(re_), int(fs), int(fe)
 
-        # 自动推导：用"在目标期"列的月份序号区间（支持跨年）
-        if self.df_raw is not None and "在目标期" in self.df_raw.columns:
-            in_tp = self.df_raw[self.df_raw["在目标期"] == 1]
-            if "月份序号_py" in in_tp.columns and len(in_tp) > 0:
-                target_lo = int(in_tp["月份序号_py"].min())
-                target_hi = int(in_tp["月份序号_py"].max())
-            else:
-                months = self._get_target_months()
-                if not months:
-                    return None
-                anchor = int(self.params["anchor"])
-                width = len(months)
-                target_lo = anchor - width + 1
-                target_hi = anchor
-        else:
-            months = self._get_target_months()
-            if not months:
-                return None
-            anchor = int(self.params["anchor"])
-            width = len(months)
-            target_lo = anchor - width + 1
-            target_hi = anchor
+        # 自动推导：anchor 中点语义（与 app.py 一致），不能用"在目标期"列的
+        # 序号 min/max——月份匹配口径下该列横跨多年同月，min/max 会得到错误区间
+        months = self._get_target_months()
+        if not months:
+            return None
+        anchor = int(self.params["anchor"])
+        width = len(months)
+        half = (width - 1) // 2
+        target_lo = anchor - half
+        target_hi = target_lo + width - 1
 
         recent_lo, recent_hi = target_lo - 12, target_hi - 12
         far_lo, far_hi = target_lo - 24, target_hi - 24
@@ -247,11 +239,12 @@ class AllocationEngine:
         is_seasonal_cat = df["一级分类"].isin(cats) if "一级分类" in df.columns else pd.Series(False, index=df.index)
 
         # 时间衰减 × 月份相似度（所有品类统一公式，品类分支在 step3 实现）
-        # 同月 → λ_same^dist × 1.0
-        # 非同月 → λ^dist × month_sim
+        # 同月 → λ_same^年差 × 1.0（年语义：去年同月=λ_same，前年同月=λ_same²）
+        # 非同月 → λ^月差 × month_sim（月语义：每早一个月乘一次 λ）
+        years_ago = (int(anchor) // 12 - df["年"].astype(int)).clip(lower=0)
         time_decay = np.where(
             is_same_month,
-            lambda_same ** dist.clip(lower=0),
+            lambda_same ** years_ago,
             lambda_val ** dist.clip(lower=0)
         )
         decay_weight = time_decay * month_sim
@@ -420,6 +413,14 @@ class AllocationEngine:
         n_strong_fallback = 0
         n_weak_all = 0
 
+        # 月数口径统一为"有出单的真实月份数"（去重年月），不用记录条数——
+        # 多变体 SKU 一个月有多条记录，条数会虚增月数，进而虚增自身权重 a
+        def _months_with_orders(rows):
+            if len(rows) == 0:
+                return 0
+            has_orders = rows[WAREHOUSES].sum(axis=1) > 0
+            return int(rows.loc[has_orders, "月份序号_py"].nunique())
+
         for sku, all_rows in all_grouped.items():
             same_rows = same_groups.get(sku, pd.DataFrame())
             same_total = same_rows["加权合计_py"].sum() if len(same_rows) > 0 else 0
@@ -430,13 +431,13 @@ class AllocationEngine:
                 if same_total > 0:
                     group = same_rows
                     n_strong_same += 1
-                    used_months = len(same_rows[same_rows[WAREHOUSES].sum(axis=1) > 0])
+                    used_months = _months_with_orders(same_rows)
                 else:
                     fallback_total = all_rows["加权合计_py"].sum()
                     if fallback_total > 0:
                         group = all_rows
                         n_strong_fallback += 1
-                        used_months = len(all_rows[all_rows[WAREHOUSES].sum(axis=1) > 0])
+                        used_months = _months_with_orders(all_rows)
                     else:
                         continue
             else:
@@ -444,13 +445,15 @@ class AllocationEngine:
                 if fallback_total > 0:
                     group = all_rows
                     n_weak_all += 1
-                    used_months = len(all_rows[all_rows[WAREHOUSES].sum(axis=1) > 0])
+                    used_months = _months_with_orders(all_rows)
                 else:
                     continue
 
             total = group["加权合计_py"].sum()
             wh_sums = {wh: group[f"加权_{wh}_py"].sum() for wh in WAREHOUSES}
-            raw_total = int(group[WAREHOUSES].sum(axis=1).sum())
+            # raw_total 固定为"目标期同月原始单量"（不随强弱季节分支变化）。
+            # 否则弱季节 SKU 的"目标期单量"实为全历史单量，新品订单量门槛永不触发
+            raw_total = int(same_rows[WAREHOUSES].sum(axis=1).sum()) if len(same_rows) > 0 else 0
             sku_weighted[sku] = {
                 "total": total,
                 "raw_total": raw_total,
@@ -464,9 +467,9 @@ class AllocationEngine:
 
         for sku in sku_weighted:
             all_rows = all_grouped[sku]
-            sku_weighted[sku]["history_months"] = len(all_rows[all_rows[WAREHOUSES].sum(axis=1) > 0])
+            sku_weighted[sku]["history_months"] = _months_with_orders(all_rows)
             same_rows = same_groups.get(sku, pd.DataFrame())
-            sku_weighted[sku]["target_months"] = len(same_rows[same_rows[WAREHOUSES].sum(axis=1) > 0]) if len(same_rows) > 0 else 0
+            sku_weighted[sku]["target_months"] = _months_with_orders(same_rows)
 
         print(f"  Step3: {len(sku_weighted)} SKUs "
               f"(strong-seasonal same-month: {n_strong_same}, "
@@ -648,7 +651,8 @@ class AllocationEngine:
             history = sw["history_months"]
             target_orders = int(sw.get("raw_total", sw.get("total", 0)))
 
-            # 新品判定 = 历史月数≤阈值 OR 目标期原始总单量<门槛
+            # 新品判定 = 历史有出单月数≤阈值 OR 目标期同月原始单量<门槛
+            # （月数与单量均为真实口径：月数去重年月，单量只看目标期同月）
             is_new = (history <= new_threshold) or (target_orders < min_orders)
 
             if is_new:
@@ -704,7 +708,7 @@ class AllocationEngine:
                 "室内外": sb["info"].get("室内外", ""),
                 "一级分类": sb["info"].get("一级分类", ""),
                 "历史月数": sw["history_months"],
-                "目标期月数": sw.get("used_months", sw["target_months"]),
+                "自身样本月数": sw.get("used_months", sw["target_months"]),
                 "目标期单量": target_orders,
                 "是否新品": "是" if is_new else "否",
                 "收缩权重_a": a,
@@ -768,10 +772,11 @@ class AllocationEngine:
     def self_check(self, df_results=None):
         """返回自检结果列表 [(项目, 状态, 说明)]。
 
-        覆盖三个易错点：
+        覆盖四个易错点：
         1. 四仓占比合计是否恒为 100%
         2. 趋势因子 α 是否真正生效
         3. 季节品类分支是否生效（强季节用同月、弱季节用全部）
+        4. 基准层级是否退化（全公司占比过高 = 基准样本为空的信号）
         """
         checks = []
 
@@ -784,6 +789,23 @@ class AllocationEngine:
                     ok = dev < 1e-9
                     checks.append((f"{label}四仓合计=100%", ok,
                                    f"最大偏差 {dev:.2e}"))
+
+        # 基准层级退化检测：基准按月份匹配口径取数，若大量SKU退到"全公司"且
+        # 基准占比恰为 0.25×4，说明目标期样本为空（常见于口径错配）
+        if df_results is not None and len(df_results) and "基准层级" in df_results.columns:
+            lvl = df_results["基准层级"].value_counts().to_dict()
+            n_company = int(lvl.get("全公司", 0))
+            share = n_company / len(df_results)
+            bm_cols = [f"基准_{wh}" for wh in WAREHOUSES]
+            is_quarter = False
+            if all(c in df_results.columns for c in bm_cols):
+                is_quarter = bool(((df_results[bm_cols] - 0.25).abs() < 1e-9).all(axis=1).all())
+            degraded = share > 0.9 and is_quarter
+            detail = ", ".join(f"{k}={v}" for k, v in sorted(lvl.items(), key=lambda x: -x[1]))
+            checks.append(("基准层级未退化", not degraded,
+                           f"层级分布: {detail}"
+                           + ("；⚠ 超90% SKU 退到全公司且基准=25%×4，目标期基准样本为空，请检查「在目标期」口径"
+                              if degraded else "")))
 
         if self.sku_weighted:
             n_strong = sum(1 for sw in self.sku_weighted.values() if sw.get("is_seasonal"))
